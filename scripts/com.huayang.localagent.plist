@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.huayang.localagent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/huayang/developer/localagent/.venv/bin/python</string>
+        <string>-m</string>
+        <string>localagent.main</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/huayang/developer/localagent</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/huayang/.local/bin:/Users/huayang/.qoderwork/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/huayang/developer/localagent/workspace/logs/localagent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/huayang/developer/localagent/workspace/logs/localagent.err</string>
+</dict>
+</plist>

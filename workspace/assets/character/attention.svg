@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <!-- LocalAgent mascot · attention · doodle blob style -->
+  <path d="M62 14 C80 11 97 21 101 38 C105 54 101 70 95 84 C89 98 75 108 58 108 C41 108 25 100 18 84 C11 68 13 48 23 34 C33 20 46 17 62 14 Z" fill="#A9E5BC"/>
+  <path d="M57 17 C54 8 66 5 66 12 C66 18 57 19 57 13" fill="none" stroke="#111" stroke-width="3.2" stroke-linecap="round"/>
+  <!-- raised surprised brows -->
+  <path d="M39 40 C43 36 50 36 53 38" fill="none" stroke="#111" stroke-width="3" stroke-linecap="round"/>
+  <path d="M67 38 C70 36 77 36 81 40" fill="none" stroke="#111" stroke-width="3" stroke-linecap="round"/>
+  <!-- wide eyes -->
+  <ellipse cx="47" cy="54" rx="9" ry="10.5" fill="#fff"/>
+  <ellipse cx="73" cy="54" rx="9" ry="10.5" fill="#fff"/>
+  <circle cx="47" cy="54" r="4.5" fill="#111"/>
+  <circle cx="73" cy="54" r="4.5" fill="#111"/>
+  <!-- open mouth -->
+  <ellipse cx="60" cy="75" rx="5" ry="4" fill="#111"/>
+  <!-- raised hand waving -->
+  <g fill="none" stroke="#2E9E63" stroke-width="3.4" stroke-linecap="round">
+    <path d="M96 62 C100 56 102 50 101 44"/>
+    <path d="M99 64 C104 59 107 54 108 49"/>
+    <path d="M100 68 C106 64 110 60 112 56"/>
+  </g>
+  <!-- doodle exclamation -->
+  <g stroke="#111" stroke-width="3.4" stroke-linecap="round">
+    <path d="M97 12 L95 24"/>
+    <circle cx="94.5" cy="30" r="1.6" fill="#111" stroke="none"/>
+  </g>
+</svg>

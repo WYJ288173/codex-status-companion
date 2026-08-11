@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <!-- LocalAgent mascot · working · doodle blob style -->
+  <path d="M62 14 C80 11 97 21 101 38 C105 54 101 70 95 84 C89 98 75 108 58 108 C41 108 25 100 18 84 C11 68 13 48 23 34 C33 20 46 17 62 14 Z" fill="#A9E5BC"/>
+  <path d="M57 17 C54 8 66 5 66 12 C66 18 57 19 57 13" fill="none" stroke="#111" stroke-width="3.2" stroke-linecap="round"/>
+  <!-- focused brows -->
+  <path d="M40 46 L52 42" stroke="#111" stroke-width="3" stroke-linecap="round"/>
+  <path d="M80 46 L68 42" stroke="#111" stroke-width="3" stroke-linecap="round"/>
+  <!-- eyes looking down at laptop -->
+  <ellipse cx="47" cy="56" rx="8" ry="9" fill="#fff"/>
+  <ellipse cx="73" cy="56" rx="8" ry="9" fill="#fff"/>
+  <circle cx="48" cy="59.5" r="4" fill="#111"/>
+  <circle cx="72" cy="59.5" r="4" fill="#111"/>
+  <!-- small determined mouth -->
+  <path d="M58 74 L65 74" stroke="#111" stroke-width="2.6" stroke-linecap="round"/>
+  <!-- doodle laptop -->
+  <g fill="none" stroke="#111" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M40 88 L44 78 L78 78 L82 88 Z"/>
+    <path d="M47 82 L60 82"/>
+    <path d="M64 84 L72 84"/>
+  </g>
+  <!-- typing hands -->
+  <g fill="none" stroke="#2E9E63" stroke-width="3.2" stroke-linecap="round">
+    <path d="M30 84 C34 82 37 80 40 79"/>
+    <path d="M92 84 C88 82 85 80 82 79"/>
+  </g>
+</svg>

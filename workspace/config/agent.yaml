@@ -1,0 +1,53 @@
+mock: false
+dingtalk:
+  mode: dws
+  send: dws
+  reply_enabled: true
+  process_mode: at_me_only
+  poll_seconds: 60
+  backfill_hours: 1
+  webhook_url: ''
+  webhook_secret: ''
+  listen_all: false
+engines:
+  default: qodercli
+  fallback:
+  - codex
+  list:
+  - name: qodercli
+    cmd:
+    - qodercli
+    - -p
+    - '{prompt}'
+    - --permission-mode
+    - auto
+  - name: codex
+    cmd:
+    - codex
+    - exec
+    - --json
+    - -s
+    - read-only
+    - '{prompt}'
+notify:
+  toast_seconds: 4
+  reopen_minutes: 30
+  ignore_cooldown_hours: 4
+  reply_rate_per_minute: 3
+  cooldown_seconds: 0
+web:
+  host: 127.0.0.1
+  port: 8765
+storage:
+  quota_gb: 5
+  report_days: 90
+  evidence_days: 30
+  audit_days: 180
+  analysis_days: 30
+  archive_months: 6
+  purge_months: 12
+solutions:
+  source_yuque: https://aliyuque.antfin.com/serveflightchange/aicoding
+  source_dir: 开发值班解决方案
+  template_url: https://aliyuque.antfin.com/serveflightchange/aicoding/ue7ng4g45cl1ogdn
+writes_disabled: false

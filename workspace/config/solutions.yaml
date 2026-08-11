@@ -1,0 +1,28 @@
+solutions:
+- code: TRP_INTER_MODIFY_STATUS_ADUIT
+  name: 国际改签状态流转基础信息审计
+  enabled: true
+  diagnose:
+  - 场景：改签单 orderStatus=改签成功、payStatus=转交易成功(打款给卖家)，但业务子状态异常 bizStatus=30（卖家待出票），状态流转不一致
+  - BCP 资损类审计规则，校验国际改签状态流转各环节状态一致性
+  - 播报上下文通常不含改签单号，需先取证取得改签单号
+  steps:
+  - 取证确认场景：核对改签单 orderStatus/payStatus/bizStatus 与播报一致，取得改签单号
+  - 订正目标 subStatus 固定为 61（配置强指定，与 orderStatus=改签成功、payStatus=转交易成功 对齐）
+  - 订正：调用 trp 的 Ateye【修改改签单subStatus】，仅限 nodeGroup=trphost_spe 且 unit=center 的机器
+  - 订正后复核改签单状态一致，并将结论回复钉群
+  actions:
+  - type: ateye_write
+    name: 订正改签单subStatus
+    write_entry_id: ateye-write-modify-substatus
+    app: ateye
+    feature: 改签单subStatus订正（trp Ateye）
+    params:
+    - modifyId
+    - subStatus
+    fixed_params:
+      subStatus: '61'
+  - type: dingtalk_reply
+    name: 回复订正结论到钉群
+    template: 订正执行后结论：审计告警已处理，当前改签单{modifyId} subStatus已置为{subStatus}（发送时按实际执行结果渲染）
+  updated_at: '2026-08-10T16:17:30+08:00'

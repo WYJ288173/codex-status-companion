@@ -1,0 +1,88 @@
+entries:
+- id: dingtalk-read-monitor-msg
+  app: dingtalk
+  scope: read
+  feature: 读取底座报警群消息（Sunfire 报警）
+  constraints:
+    groups:
+    - 改签底座质量监控
+    - 改签审计报警群
+  alertRules:
+  - type: keyword
+    keywords:
+    - 报警
+    - 告警
+  - type: keyword
+    keywords:
+    - 改签
+    - 退票
+    - 退改
+    - change-flight
+    - flyrp
+    - flycp
+    - 底座
+  enabled: true
+- id: dingtalk-read-audit-at-me
+  app: dingtalk
+  scope: read
+  feature: 读取@我的消息（审计/工单专项分析）
+  constraints:
+    groups:
+    - 改签审计报警群
+    mode: at_me_only
+  enabled: true
+- id: flyrp-read-order
+  app: flyrp
+  scope: read
+  feature: 查询退票单与费用数据
+  constraints:
+    command: python3 scripts/query_refund_order.py --order {orderId}
+    paramsWhitelist:
+      orderId: ^\d{10,20}$
+  enabled: true
+- id: dingtalk-write-reply
+  app: dingtalk
+  scope: write
+  feature: 回复分析结论到值班群
+  constraints:
+    groups:
+    - 改签底座质量监控
+    - 改签审计报警群
+    rateLimit:
+      perMinute: 3
+  enabled: true
+- id: flyrp-write-fix-fee
+  app: flyrp
+  scope: write
+  feature: 退票费金额不一致订正
+  env: pre
+  constraints:
+    command: python3 scripts/fix_refund_fee.py --order {orderId} --fee {correctFee}
+    conditions:
+    - alert.type == 'REFUND_FEE_MISMATCH'
+    - diff_amount < 100
+    paramsWhitelist:
+      orderId: ^\d{10,20}$
+      correctFee: ^\d+(\.\d{1,2})?$
+  expiry: '2026-09-30T23:59:59+08:00'
+  maxExecutions: 10
+  disableOnFailure: true
+  enabled: false
+- id: ateye-write-modify-substatus
+  app: ateye
+  scope: write
+  feature: 改签单subStatus订正（trp Ateye）
+  env: online
+  constraints:
+    command: python3 scripts/ateye_invoke.py --app trp --invoker 修改改签单subStatus --node-group
+      trphost_spe --unit center --modify-id {modifyId} --sub-status {subStatus}
+    conditions:
+    - (analysis.source == 'audit_group_at_me' or analysis.source == 'audit_broadcast')
+    paramsWhitelist:
+      modifyId: ^\d{6,20}$
+      subStatus: ^[0-9A-Za-z_]{1,32}$
+    timeout: 600
+  expiry: '2026-09-30T23:59:59+08:00'
+  maxExecutions: 5
+  disableOnFailure: true
+  enabled: true

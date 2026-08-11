@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <!-- LocalAgent mascot · error · doodle blob style -->
+  <path d="M62 14 C80 11 97 21 101 38 C105 54 101 70 95 84 C89 98 75 108 58 108 C41 108 25 100 18 84 C11 68 13 48 23 34 C33 20 46 17 62 14 Z" fill="#A9E5BC"/>
+  <!-- droopy hair curl -->
+  <path d="M57 17 C54 10 62 6 65 10 C68 14 62 18 59 16 C57 15 58 12 60 12" fill="none" stroke="#111" stroke-width="3.2" stroke-linecap="round"/>
+  <!-- X eyes -->
+  <g stroke="#111" stroke-width="3.4" stroke-linecap="round">
+    <path d="M41 48 L52 59"/><path d="M52 48 L41 59"/>
+    <path d="M68 48 L79 59"/><path d="M79 48 L68 59"/>
+  </g>
+  <!-- wavy sad mouth -->
+  <path d="M50 76 C54 72 58 79 62 75 C66 71 70 78 73 74" fill="none" stroke="#111" stroke-width="2.6" stroke-linecap="round"/>
+  <!-- sweat drop -->
+  <path d="M92 40 C95 45 95 49 92 51 C89 49 89 45 92 40 Z" fill="#7EC8E3"/>
+  <!-- hanging arms -->
+  <g fill="none" stroke="#2E9E63" stroke-width="3.4" stroke-linecap="round">
+    <path d="M18 70 C17 76 17 82 19 87"/>
+    <path d="M100 70 C101 76 101 82 99 87"/>
+  </g>
+  <!-- doodle sparks -->
+  <g stroke="#111" stroke-width="2.6" stroke-linecap="round">
+    <path d="M14 18 L20 24"/><path d="M20 18 L14 24"/>
+  </g>
+</svg>
