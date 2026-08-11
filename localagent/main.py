@@ -86,8 +86,16 @@ async def run():
             await asyncio.sleep(86400)
             storage.cleanup_analysis(app.db, analysis_days)
 
+    async def _probe_engines():
+        try:
+            await engine_mod.probe_engines(app.cfg, app.db)
+        except Exception as e:
+            app.db.audit("engine", "probe_failed", "", str(e)[:200])
+
     asyncio.create_task(app.notifier.reopen_loop())
     asyncio.create_task(_periodic_cleanup())
+    if not app.cfg.mock and app.cfg.engines.get("probe_on_start", True):
+        asyncio.create_task(_probe_engines())
     await app.ding.start()
 
 

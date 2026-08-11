@@ -1,7 +1,8 @@
 import asyncio
 import json
 import re
-import shutil
+
+from .db import now
 
 PROMPT_TEMPLATE = """你是退改系统值班分析助手。你拥有本机 CLI 的全部 skills 与 MCP 能力。
 
@@ -80,8 +81,8 @@ def _mock_analyze(ctx_text, source):
             "anomalies": [], "suggestions": []}
 
 
-def _extract_json(raw):
-    """从可能含多段 JSON/杂散文本的输出中提取最后一个含 normal/conclusion 的 JSON 对象。"""
+def _scan_json(raw):
+    """扫描文本中所有 JSON 对象，返回最后一个含 normal/conclusion 的对象。"""
     dec = json.JSONDecoder()
     best = None
     for i, ch in enumerate(raw):
@@ -96,22 +97,131 @@ def _extract_json(raw):
     return best
 
 
-async def _run_engine(cfg, name, prompt, db=None, run_id=None):
+def _iter_strings(obj):
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_strings(v)
+
+
+def _extract_json(raw):
+    """从引擎输出中提取结论 JSON。
+    先直接扫描；未命中时按 JSONL 事件流（codex --json）解析，结论 JSON 常被转义嵌在事件字符串字段中。"""
+    best = _scan_json(raw)
+    if best is not None:
+        return best
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except Exception:
+            continue
+        for s in _iter_strings(evt):
+            if "normal" not in s and "conclusion" not in s:
+                continue
+            got = _scan_json(s)
+            if got is not None:
+                best = got
+    return best
+
+
+class EngineUnavailable(RuntimeError):
+    """引擎资源不可用（额度/限流/鉴权），非分析失败，可重试。"""
+
+
+RESOURCE_HINTS = ("credit usage limit", "usage limit", "rate limit", "quota",
+                  "insufficient credit", "upgrade your subscription",
+                  "too many requests", "unauthorized", "not logged in",
+                  "please login", "authentication failed")
+
+
+def engine_models(cfg, name):
+    """候选模型链：显式 model 优先，未配置时首位为 None（引擎默认模型），其后接 model_fallback。"""
+    for e in cfg.engines.get("list", []):
+        if e.get("name") != name:
+            continue
+        head = [e["model"]] if e.get("model") else [None]
+        return head + [m for m in (e.get("model_fallback") or []) if m != e.get("model")]
+    return [None]
+
+
+def _model_flag(cfg, name):
+    for e in cfg.engines.get("list", []):
+        if e.get("name") == name:
+            return e.get("model_flag", "-m")
+    return "-m"
+
+
+def engine_chain(cfg):
+    """引擎链：default 在前，其后 fallback（去重）。"""
+    name = cfg.engines.get("default", "qodercli")
+    fb_raw = cfg.engines.get("fallback", [])
+    fb = [fb_raw] if isinstance(fb_raw, str) else list(fb_raw or [])
+    chain = [name] + [x for x in fb if x and x != name]
+    return chain
+
+
+async def _run_engine(cfg, name, prompt, db=None, run_id=None, model=None, timeout=900):
     cmd = cfg.engine_cmd(name)
     if not cmd:
         raise RuntimeError(f"engine {name} 未配置")
     argv = [c.replace("{prompt}", prompt) for c in cmd]
+    if model:
+        argv += [_model_flag(cfg, name), model]
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=900)
+    out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     raw = out.decode()
     result = _extract_json(raw)
     if result is None:
+        tag = f"{name}" + (f"/{model}" if model else "")
         if db:
-            db.audit("engine", "raw_output", name,
+            db.audit("engine", "raw_output", tag,
                      f"stdout={raw[-800:]} | stderr={err.decode()[-300:]}", run_id)
-        raise RuntimeError(f"{name} 输出无有效 JSON: {raw[:150]} / err={err.decode()[:100]}")
+        low = (raw + " " + err.decode()).lower()
+        if any(h in low for h in RESOURCE_HINTS):
+            raise EngineUnavailable(f"{tag} 资源不可用（额度/限流/鉴权）：{raw.strip()[:150]}")
+        raise RuntimeError(f"{tag} 输出无有效 JSON: {raw[:150]} / err={err.decode()[:100]}")
     return result
+
+
+async def _run_with_downgrade(cfg, db, prompt, run_id):
+    """按「引擎链 × 模型链」逐级降级执行；返回 (result, engine, model)。
+    资源不可用先同引擎换模型，再换引擎；全部资源不可用抛 EngineUnavailable。"""
+    last_real_error = None
+    unavailable = []
+    for ei, name in enumerate(engine_chain(cfg)):
+        models = engine_models(cfg, name)
+        engine_all_unavailable = True
+        for mi, model in enumerate(models):
+            if ei or mi:
+                db.audit("engine", "model_downgraded" if ei == 0 else "engine_downgraded",
+                         f"{name}/{model or 'default'}",
+                         f"前序不可用，降级重试：{'; '.join(unavailable)[-200:]}", run_id)
+            try:
+                result = await _run_engine(cfg, name, prompt, db, run_id, model=model)
+                return result, name, model
+            except EngineUnavailable as e:
+                unavailable.append(str(e)[:120])
+                db.audit("engine", "engine_resource_unavailable",
+                         f"{name}/{model or 'default'}", str(e)[:200], run_id)
+            except Exception as e:
+                engine_all_unavailable = False
+                last_real_error = e
+                db.audit("engine", "engine_failed", f"{name}/{model or 'default'}",
+                         str(e)[:300], run_id)
+        if engine_all_unavailable and models:
+            db.audit("engine", "engine_models_exhausted", name,
+                     f"{len(models)} 个模型均资源不可用", run_id)
+    if last_real_error is not None:
+        raise last_real_error
+    raise EngineUnavailable("所有引擎与模型均资源不可用：" + "; ".join(unavailable)[-400:])
 
 
 async def analyze(cfg, db, context: dict, run_id):
@@ -121,28 +231,9 @@ async def analyze(cfg, db, context: dict, run_id):
         result = _mock_analyze(ctx_text, context.get("source"))
         engine, version = "mock-qoder", "1.20.0"
     else:
-        name = cfg.engines.get("default", "qodercli")
-        engine, version = name, "unknown"
         prompt = PROMPT_TEMPLATE.format(context=ctx_text)
-        try:
-            result = await _run_engine(cfg, name, prompt, db, run_id)
-        except Exception as e:
-            db.audit("engine", "engine_failed", name, str(e), run_id)
-            fb_raw = cfg.engines.get("fallback", [])
-            fallback_chain = [fb_raw] if isinstance(fb_raw, str) else fb_raw
-            success = False
-            for fb in fallback_chain:
-                if fb == name:
-                    continue
-                try:
-                    result = await _run_engine(cfg, fb, prompt, db, run_id)
-                    engine = fb
-                    success = True
-                    break
-                except Exception as fe:
-                    db.audit("engine", "engine_failed", fb, str(fe), run_id)
-            if not success:
-                raise
+        result, engine, model = await _run_with_downgrade(cfg, db, prompt, run_id)
+        version = model or "default-model"
         if result.get("anomalies") and not result.get("evidence"):
             db.audit("engine", "evidence_missing_retry", engine, "", run_id)
             retry_prompt = (prompt + "\n\n【重要纠正】你上一次输出直接给出了异常结论但没有任何取证记录，该结论已被拒绝。"
@@ -150,7 +241,7 @@ async def analyze(cfg, db, context: dict, run_id):
                             "订单查询等 skill 取证（禁止直调 flyeye MCP），skill 不可用才降级 MCP 并在 action 标注通道；"
                             "再重新输出 JSON，evidence 数组不得为空；取证失败或全通道不可用需在 evidence 记录失败原因或标注「未取证」。")
             try:
-                retried = await _run_engine(cfg, engine, retry_prompt, db, run_id)
+                retried = await _run_engine(cfg, engine, retry_prompt, db, run_id, model=model)
                 if retried.get("evidence"):
                     result = retried
             except Exception as e:
@@ -160,6 +251,34 @@ async def analyze(cfg, db, context: dict, run_id):
                                               "请在报警中心点\"重新分析\"补充线索。")
     db.audit("engine", "analyze_done", engine, json.dumps(result, ensure_ascii=False)[:500], run_id)
     return result, engine, version
+
+
+PROBE_PROMPT = ('Reply with exactly this JSON and nothing else: '
+                '{"normal": true, "conclusion": "probe"}')
+
+
+async def probe_engines(cfg, db=None):
+    """最小探针：逐个引擎 × 候选模型实跑一次，记录可用性到 conn_state.engine_probe。"""
+    out = {}
+    for name in engine_chain(cfg):
+        if not cfg.engine_cmd(name):
+            out[name] = "未配置"
+            continue
+        for model in engine_models(cfg, name):
+            key = f"{name}/{model or 'default'}"
+            try:
+                await _run_engine(cfg, name, PROBE_PROMPT, None, None,
+                                  model=model, timeout=180)
+                out[key] = "ok"
+            except EngineUnavailable as e:
+                out[key] = f"资源不可用: {str(e)[:80]}"
+            except Exception as e:
+                out[key] = f"失败: {str(e)[:80]}"
+    if db is not None:
+        db.set_state("engine_probe", json.dumps(out, ensure_ascii=False))
+        db.set_state("engine_probe_at", now())
+        db.audit("engine", "engines_probed", "", json.dumps(out, ensure_ascii=False)[:400])
+    return out
 
 
 async def detect_versions(cfg):

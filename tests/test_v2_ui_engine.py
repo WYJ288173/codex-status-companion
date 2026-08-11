@@ -36,6 +36,30 @@ prompt = T.format(context="订单 91234567890 报警")
 check("prompt 渲染后仍含策略文本",
       "取证通道优先级" in prompt and "flyeye-log-query" in prompt and "未取证" in prompt)
 
+# ---------- 1b. 引擎输出解析（codex --json 事件流 / 额度耗尽） ----------
+CODEX_STREAM = (
+    '{"type":"thread.started","thread_id":"019fee97"}\n'
+    '{"type":"turn.started"}\n'
+    '{"type":"item.completed","item":{"id":"item_0","type":"assistant_message","text":'
+    '"{\\"normal\\": false, \\"conclusion\\": \\"规则趋势因鉴权失败未核实\\", '
+    '\\"evidence\\": [{\\"action\\": \\"skill:sunfire-cli\\", \\"finding\\": \\"Auth[E10]\\"}], '
+    '\\"anomalies\\": [{\\"severity\\": \\"P2\\", \\"summary\\": \\"未核实\\"}]}"}}\n'
+    '{"type":"turn.completed","usage":{"input_tokens":1}}\n')
+got = engine._extract_json(CODEX_STREAM)
+check("codex 事件流可提取嵌套结论 JSON", got is not None and got["normal"] is False
+      and got["anomalies"][0]["severity"] == "P2", str(got)[:120])
+check("codex 提取保留证据", got and got["evidence"][0]["action"] == "skill:sunfire-cli")
+check("普通直出 JSON 仍可解析",
+      engine._extract_json('前言\n{"normal": true, "summary": "ok"}\n后记')["normal"] is True)
+check("多段取最后一个",
+      engine._extract_json('{"normal": true}\n{"normal": false, "conclusion": "x"}')["normal"] is False)
+check("无结论输出返回 None", engine._extract_json("no json here {}" ) is None)
+QUOTA_OUT = ("You've reached your credit usage limit. Please upgrade your subscription plan "
+             "to get more resources.")
+check("识别额度耗尽输出", any(h in QUOTA_OUT.lower() for h in engine.RESOURCE_HINTS))
+check("识别鉴权类不可用", any(h in "Unauthorized, please login".lower()
+                        for h in engine.RESOURCE_HINTS))
+
 # ---------- 2. 钉群 Markdown 降噪 ----------
 RAW = ("### 改签履约-审计汇总-告警定时播报2026-08-07 10:30\n\n"
        "**今日未完结:2个**\n\n-----\n\n"

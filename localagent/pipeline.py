@@ -110,6 +110,13 @@ class Pipeline:
                                              {"code": x["code"], "write_gate": bool(x.get("enabled")),
                                               "write_entry_id": x.get("write_entry_id")}
                                              for x in matched_sols]}}, run_id)
+        except engine.EngineUnavailable as e:
+            # 引擎资源不可用（额度/限流/鉴权）：非分析失败，不写报告、不产报警，保留消息待重跑
+            db.update("runs", "run_id", run_id, status="engine_unavailable",
+                      finished_at=now(), error_msg=str(e)[:500])
+            db.audit("engine", "engine_unavailable_run", msg["group"], str(e)[:300], run_id)
+            self.notifier.toast(f"{msg['group']} 引擎资源不可用，可重试")
+            return {"handled": False, "reason": "engine_unavailable", "run_id": run_id}
         except Exception as e:
             db.update("runs", "run_id", run_id, status="failed", finished_at=now(), error_msg=str(e))
             fail_result = {"normal": False,
@@ -178,6 +185,11 @@ class Pipeline:
                                "extra": {"previous_run": orig_run_id, "user_note": note,
                                          "audit_broadcast": audit_parsed, "alert_codes": codes}},
                 run_id)
+        except engine.EngineUnavailable as e:
+            db.update("runs", "run_id", run_id, status="engine_unavailable",
+                      finished_at=now(), error_msg=str(e)[:500])
+            db.audit("engine", "engine_unavailable_run", run0["source"], str(e)[:300], run_id)
+            return run_id
         except Exception as e:
             db.update("runs", "run_id", run_id, status="failed",
                       finished_at=now(), error_msg=str(e))
@@ -220,6 +232,24 @@ class Pipeline:
             self._reply_if_allowed(run0["source"], result, run_id)
         db.audit("task", "reanalyze", orig_run_id, note[:200], run_id)
         return run_id
+
+    async def rerun(self, run_id):
+        """引擎资源不可用后的一键重跑：按原始消息语义重新分析（非「结论不准」的补充分析）。"""
+        db = self.db
+        run0 = db.one("SELECT * FROM runs WHERE run_id=?", run_id)
+        if not run0:
+            return None
+        m0 = db.one("SELECT * FROM messages WHERE run_id=?", run_id)
+        text = (m0["source_text"] if m0 and m0["source_text"] else run0["source_text"]) or ""
+        if not text.strip():
+            return None
+        msg = {"msg_id": f"rerun-{run_id}-{new_id('m')}",
+               "group": (m0["group_name"] if m0 else run0["source"]) or "",
+               "sender": (m0["sender"] if m0 else "rerun") or "rerun",
+               "text": text,
+               "at_me": run0["trigger_type"] == "dingtalk_at_me"}
+        db.audit("task", "rerun_submitted", msg["group"], f"from {run_id}", run_id)
+        return await self.process(msg)
 
     def manual_trigger_solution(self, code, params, group):
         """报警中心手动触发某告警码的解决方案：直接按方案 actions 生成执行计划

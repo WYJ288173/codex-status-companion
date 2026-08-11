@@ -21,6 +21,9 @@ engines:
     - '{prompt}'
     - --permission-mode
     - auto
+    model_fallback:
+    - Peach-07-17-DogFooding
+    - qwen3.8-v116-dogfood-crit
   - name: codex
     cmd:
     - codex
@@ -29,6 +32,7 @@ engines:
     - -s
     - read-only
     - '{prompt}'
+  probe_on_start: true
 notify:
   toast_seconds: 4
   reopen_minutes: 30

@@ -73,6 +73,18 @@ def build_app(app_ctx):
         versions = db.get_state("engine_versions", "{}")
         writes_disabled = bool(app_ctx.cfg.agent.get("writes_disabled", False))
         paused = db.get_state("tasks_paused") == "1"
+        unavail = db.one("SELECT COUNT(*) c FROM runs WHERE status='engine_unavailable'")["c"]
+        try:
+            probe = json.loads(db.get_state("engine_probe", "{}") or "{}")
+        except Exception:
+            probe = {}
+        probe_txt = "未探测"
+        if probe:
+            probe_txt = "　".join(
+                "<span class='%s'>%s=%s</span>" % ("ok" if v == "ok" else "err", k, v)
+                for k, v in probe.items())
+            probe_txt += ("<span style='color:#9fb3c0;font-size:11px'>（探测于 %s）</span>"
+                          % db.get_state("engine_probe_at", "-"))
         trend_r = {r["d"]: r["c"] for r in db.q(
             "SELECT substr(started_at,1,10) d, COUNT(*) c FROM runs "
             "WHERE date(started_at) >= date('now','localtime','-6 day') GROUP BY d")}
@@ -88,12 +100,16 @@ def build_app(app_ctx):
             f"<div title='报警 {trend_a.get(d,0)}' style='width:12px;height:{max(2, int(trend_a.get(d,0)/max_c*60))}px;background:#f59e0b;border-radius:2px 2px 0 0'></div>"
             f"</div><div style='font-size:10px;color:#9fb3c0'>{d[5:]}</div></div>"
             for d in days7)
+        unavail_link = ("<a style='color:#7ee7b0' href='/history?days=7&"
+                        "status_f=engine_unavailable'>查看并一键重跑</a>" if unavail else "-")
         body = f"""<script>setTimeout(()=>location.reload(), 5000)</script>
         <div class="card"><h2>实时状态（5 秒自动刷新）</h2><table>
         <tr><td>常驻进程</td><td class="ok">running（启动于 {db.get_state('agent_started_at', '-')}，内存 {mem_mb:.0f} MB）</td></tr>
         <tr><td>钉钉连接</td><td class="{ 'ok' if conn in ('connected','mock','dws_polling') else 'warn' }">{'● 健康' if conn in ('connected','mock','dws_polling') else '● 异常'}（{conn}）</td></tr>
         <tr><td>上次轮询 / 最近命中</td><td>{db.get_state('dws_last_poll','-') or '-'} / {db.get_state('dws_last_hit','-') or '-'}</td></tr>
         <tr><td>引擎可用性</td><td>{db.get_state('engine_versions','-')}</td></tr>
+        <tr><td>引擎/模型探针</td><td>{probe_txt}</td></tr>
+        <tr><td>引擎资源不可用（可重试）</td><td class="{'warn' if unavail else 'ok'}">{unavail} 条</td><td>{unavail_link}</td></tr>
         <tr><td>累计执行 / 今日异常 / 待确认</td><td>{runs[0]['c']} / {today_alerts[0]['c']} /
             <span class="{'warn' if pending else 'ok'}">{pending}</span></td></tr>
         <tr><td>写操作紧急开关</td><td class="{'err' if writes_disabled else 'ok'}">{'已禁用全部写操作' if writes_disabled else '正常'}</td>
@@ -144,18 +160,26 @@ def build_app(app_ctx):
             + f" <a style='color:#38bdf8' href='/history.csv?{qs}'>导出 CSV</a></p>"
         body += (f"<form method='get'><input type='hidden' name='days' value='{days}'>"
                  f"触发 <select name='trigger'>{opts(trigger, ['', 'dingtalk_alert', 'dingtalk_at_me', 'reanalyze', 'simulate'])}</select> "
-                 f"状态 <select name='status_f'>{opts(status_f, ['', 'success', 'failed', 'running'])}</select> "
+                 f"状态 <select name='status_f'>{opts(status_f, ['', 'success', 'failed', 'running', 'engine_unavailable'])}</select> "
                  f"来源 <input name='source' value='{source}' placeholder='群名/来源'> "
                  f"<label><input type='checkbox' name='show_test' value='1' {'checked' if show_test else ''}> 含测试注入</label> "
                  f"<button class='gray'>筛选</button></form>")
+        body += ("<script>async function rerun(run){"
+                 "if(!confirm('引擎资源不可用，按原始报警内容重跑分析？将自动按模型降级链选择可用模型。'))return;"
+                 "const r=await fetch('/api/rerun/'+run,{method:'POST'});const j=await r.json();"
+                 "alert(j.run_id?('已重跑：'+j.run_id):('失败：'+(j.error||'')));location.reload()}</script>")
         body += ("<script>async function retry(run){if(!confirm('对该失败任务发起重新分析？'))return;"
                  "const r=await fetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},"
                  "body:JSON.stringify({note:'失败重试'})});const j=await r.json();"
                  "alert(j.new_run?('已触发重新分析：'+j.new_run):('失败：'+(j.error||'')));location.reload()}</script>")
         body += "<table><tr><th>run</th><th>触发</th><th>来源</th><th>状态</th><th>引擎</th><th>开始</th><th>报告</th><th>操作</th></tr>"
         for r in rows:
-            op = (f"<button class='gray' onclick=\"retry('{r['run_id']}')\">重试</button>"
-                  if r["status"] == "failed" else "-")
+            if r["status"] == "engine_unavailable":
+                op = f"<button onclick=\"rerun('{r['run_id']}')\">重跑</button>"
+            elif r["status"] == "failed":
+                op = f"<button class='gray' onclick=\"retry('{r['run_id']}')\">重试</button>"
+            else:
+                op = "-"
             body += (f"<tr><td><a style='color:#7ee7b0' href='/history/{r['run_id']}'>{r['run_id']}</a></td>"
                      f"<td>{r['trigger_type']}</td><td>{r['source']}</td><td>{r['status']}</td>"
                      f"<td>{r['engine'] or '-'}</td><td>{r['started_at']}</td>"
@@ -525,6 +549,14 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
             return {"error": "请输入补充信息"}
         new_run = await app_ctx.pipeline.reanalyze(run_id, note)
         return {"new_run": new_run} if new_run else {"error": "原记录不存在"}
+
+    @app.post("/api/rerun/{run_id}")
+    async def api_rerun(run_id: str):
+        r = await app_ctx.pipeline.rerun(run_id)
+        if r is None:
+            return {"error": "原记录不存在或无原始消息内容"}
+        return {"run_id": r.get("run_id"), "reason": r.get("reason"),
+                "handled": bool(r.get("handled"))}
 
     @app.post("/api/alerts/{alert_id}/trigger_solution")
     async def alert_trigger_solution(alert_id: str, request: Request):
