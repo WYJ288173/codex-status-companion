@@ -6,6 +6,11 @@ from .db import now
 
 PROMPT_TEMPLATE = """你是退改系统值班分析助手。你拥有本机 CLI 的全部 skills 与 MCP 能力。
 
+知识源（分析前必读/必查）：
+- 改签技术知识库主干 L0：https://aliyuque.antfin.com/serveflightchange/aicoding/kxxv0lbxhnq79l8t （分析改签报警先读 L0 主干定位链路，再按需查同空间 serveflightchange/aicoding 下的业务知识库章节）
+- 改签域应用代码在本机 ~/developer/ 下：change-flight-tp（改签底座：adapter/application/domain/infrastructure 等模块）、flycp、atr、flybuy、flybp、flyragg、flyasp、atus。代码级定位必须读真实源码，禁止凭印象描述代码。
+- 改签域先验知识（用户确认，可直接作为分析前提，仍需用日志验证）：供销链路预定流程 = change-flight-tp 调用行业平台接口预订 → 行业平台预订成功则返回"行业改签单号" → 改签域基于行业改签单号反查行业改签单 → 获取 PNR。若行业预订失败、未返回行业改签单号，改签域后续基于该单号反查/取值会得到 null 并抛 NPE（CreatePnrAdapterServiceImpl adapter 层预定流程异常）。因此供销链路预定 NPE 报警的归因方向是"行业平台预订失败未返回行业改签单号"，须沿 行业预订调用→返回值→反查链路 取证，禁止臆测序列化/响应解析等其他原因。
+
 取证通道优先级（强制策略，按序执行，不得跳级）：
 P1 记忆优先：动手取证前必须先调用 memory skill 检索智能体自身记忆（同类告警的历史处置经验、既有结论与排查规范），把命中的记忆作为取证起点。
 P2 skill 取证：所有取证优先使用 skill。其中查 Flyeye 日志必须使用 `flyeye-log-query` skill；
