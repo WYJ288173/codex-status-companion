@@ -183,9 +183,20 @@ def render_report_html(data, rel_path=""):
     html.append("<div class='card'><h2>排查证据（%d 步，点击展开详情）</h2>%s</div>"
                 % (len(ev), "".join(tl) or "<p style='color:#9fb3c0'>无取证记录</p>"))
     sug = data.get("suggestions") or []
+    run_id = data.get("run_id") or ""
+    sug_rows = []
+    for i, s in enumerate(sug):
+        extra = ""
+        if isinstance(s, dict) and s.get("action_type") == "tech_requirement" and run_id:
+            if s.get("aone_req_url"):
+                extra = (f" <a style='color:#7ee7b0;font-size:12px' target='_blank' "
+                         f"href='{esc(s['aone_req_url'])}'>Aone需求已创建</a>")
+            else:
+                extra = (f" <button style='font-size:12px' "
+                         f"onclick=\"createAoneReq('{esc(run_id)}',{i})\">创建 Aone 需求</button>")
+        sug_rows.append(f"<div style='font-size:13px;margin:4px 0'>· {_fmt_suggestion(s)}{extra}</div>")
     html.append("<div class='card'><h2>建议动作</h2>"
-                + ("".join(f"<div style='font-size:13px;margin:4px 0'>· {_fmt_suggestion(s)}</div>"
-                           for s in sug) or "<p style='color:#9fb3c0'>无</p>") + "</div>")
+                + ("".join(sug_rows) or "<p style='color:#9fb3c0'>无</p>") + "</div>")
     audit = data.get("audit") or []
     html.append("<div class='card'><h2>审计摘要</h2><details><summary "
                 "style='cursor:pointer;color:#9fb3c0;font-size:12px'>展开</summary>"

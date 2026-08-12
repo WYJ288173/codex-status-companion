@@ -550,7 +550,17 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
             return page("<div class='card'><h2>报告不存在</h2>"
                         f"<p style='color:#9fb3c0'>{rdr.esc(p)}</p></div>")
         return page(f"<h2 style='margin:0 0 12px'>{rdr.esc(data.get('title') or '分析报告')}</h2>"
-                    + rdr.render_report_html(data, os.path.relpath(fp, base)))
+                    + rdr.render_report_html(data, os.path.relpath(fp, base))
+                    + "<script>async function createAoneReq(run,idx){"
+                    "const d=await (await fetch('/api/aone_req/draft/'+run+'/'+idx)).json();"
+                    "if(d.error){alert(d.error);return}"
+                    "const proj=prompt('目标 Aone 需求空间（项目名/ID，可修改）：',d.project||'');"
+                    "if(proj===null)return;"
+                    "if(!confirm('确认创建 Aone 技术需求？\\n\\n标题：'+d.title+'\\n\\n描述预览：\\n'+d.desc.slice(0,500)+'\\n\\n点击确定后由引擎调用 aone-requirement-create 创建。'))return;"
+                    "const r=await fetch('/api/aone_req/create/'+run+'/'+idx,{method:'POST',"
+                    "headers:{'Content-Type':'application/json'},"
+                    "body:JSON.stringify({title:d.title,desc:d.desc,project:proj})});"
+                    "const j=await r.json();alert(j.submitted?'已提交创建，完成后报告页将显示需求链接':('失败：'+(j.error||'')));location.reload()}</script>")
 
     @app.post("/api/reanalyze/{run_id}")
     async def reanalyze(run_id: str, request: Request, bg: BackgroundTasks):
@@ -572,6 +582,27 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
         if not run0:
             return {"error": "原记录不存在或无原始消息内容"}
         bg.add_task(app_ctx.pipeline.rerun, run_id)
+        return {"submitted": True, "run_id": run_id}
+
+    @app.get("/api/aone_req/draft/{run_id}/{idx}")
+    def aone_req_draft(run_id: str, idx: int):
+        from . import aone as aonemod
+        return aonemod.draft(app_ctx.cfg, app_ctx.db, run_id, idx)
+
+    @app.post("/api/aone_req/create/{run_id}/{idx}")
+    async def aone_req_create(run_id: str, idx: int, request: Request, bg: BackgroundTasks):
+        from . import aone as aonemod
+        data = await request.json()
+        title = (data.get("title") or "").strip()
+        desc = (data.get("desc") or "").strip()
+        project = (data.get("project") or "").strip()
+        if not title or not desc:
+            return {"error": "标题与描述不能为空（须经确认页确认）"}
+        chk = aonemod.draft(app_ctx.cfg, app_ctx.db, run_id, idx)
+        if chk.get("error"):
+            return chk
+        bg.add_task(aonemod.execute, app_ctx.cfg, app_ctx.db, run_id, idx,
+                    title, desc, project)
         return {"submitted": True, "run_id": run_id}
 
     @app.post("/api/alerts/{alert_id}/trigger_solution")
