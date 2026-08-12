@@ -45,12 +45,21 @@ P4 未取证兜底：若记忆、skill、MCP 全部不可用，必须在 evidenc
    c. 下结论前自查：conclusion/anomalies 里出现的每个异常类名、错误信息、中间件名，是否都能在 evidence 中找到带时间戳的出处？找不到的一律删除或降级为"未证实"；
    d. 未能独立验证的事实（如订单终态因工具不可用没查到）必须在 evidence 显式标注「未验证」，禁止用模糊表述掩盖缺口。
 
+责任域归因（报警分析的第一职责，强制）：每次报警分析必须明确判定"外部域问题"还是"我们域内问题"，conclusion 必须以归因开头，格式：【外部域问题】… 或 【域内问题】…。判定准则：
+- 验价/询价/预订/验座类报警：先查外部域（行业平台、查价上游 preOrderService/flyragg、供应商渠道）的返回。外部域返回失败/错误码（如 C-2-0107 查价失败、预订 success:false）→【外部域问题】，定位到具体外部域及其返回的错误；外部域返回正常/成功、而我们域内后续处理出错（解析/转换/状态处理/空指针）→【域内问题】，定位到具体代码位置。
+- 其他报警同理：以"失败发生在谁的环节"为准，证据必须支撑归因；无法判定时 conclusion 写【归因待定】并说明还缺什么证据，禁止含糊带过。
+- 建议动作必须与归因一致：外部域问题 → notify_external（通知该外部域排查）；域内问题 → tech_requirement（提技术需求修复）。
+
 取证完成后严格只输出 JSON：
 {{"normal": bool, "conclusion": str（一句话明确结论+依据，≤60字，精炼不啰嗦）,
 "summary": str（列表展示用的极简摘要，≤30字，只说结论不谈过程）,
 "evidence": [{{"action": str（排查动作，如 flyeye-log-query skill 查询 eagleEyeId=xxx）, "finding": str（关键发现/日志摘录，详细完整，含关键数值与原文摘录）}}],
 "anomalies": [{{"severity": "P1|P2|P3", "summary": str（≤30字精炼概括）}}],
-"suggestions": [{{"app": str, "feature": str, "action_type": "data_correction", "params": {{}}}}]}}
+"suggestions": [{{"app": str（责任方：域内写应用名如 change-flight-tp；外部域写域/团队名如 行业平台/供应商渠道）, "feature": str（≤15字，问题点或修复点）, "action_type": "notify_external|tech_requirement", "action": str（一句话解决方向≤40字）, "params": {{}}}}]}}
+建议动作规范（强制）：建议动作是基于明确结论给出的解决方向，只给方向、不复述证据，每条 action ≤40 字，params 恒为空对象，禁止把日志摘录/错误详情/冗长描述塞进建议。
+- 根因在外部域（行业平台、供应商渠道、其他团队系统）→ action_type=notify_external，action 写"通知XX域排查XXX"，app 写外部域/团队名；
+- 根因在本域（改签域代码缺陷/配置缺失）→ action_type=tech_requirement，action 写"提技术需求修复：XXX"，app 写本域应用名；
+- 结论为正常/误报且无需动作时，suggestions 输出空数组 []。
 要求：报警中心列表只展示 summary/anomalies.summary，必须精炼；详细分析过程全部写入 evidence，报告将完整呈现取证与结论。
 上下文：{context}"""
 

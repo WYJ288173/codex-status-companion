@@ -34,7 +34,11 @@ TPL = """# {title}
 
 def _fmt_suggestion(s):
     if isinstance(s, dict):
-        return f"- {s.get('app')}/{s.get('feature')} params={s.get('params')}"
+        t = s.get("action_type") or ""
+        tag = {"notify_external": "通知外部域", "tech_requirement": "技术需求修复"}.get(t, t)
+        act = s.get("action") or ""
+        base = f"- [{tag}] {s.get('app')}/{s.get('feature')}"
+        return f"{base}：{act}" if act else base
     return f"- {s}"
 
 

@@ -125,8 +125,13 @@ SEV_COLOR = {"P1": "#f87171", "P2": "#f59e0b", "P3": "#38bdf8", "OK": "#7ee7b0"}
 
 def _fmt_suggestion(s):
     if isinstance(s, dict):
-        return (f"{esc(s.get('app'))}/{esc(s.get('feature'))} "
-                f"<code style='color:#9fb3c0'>{esc(json.dumps(s.get('params') or {}, ensure_ascii=False))}</code>")
+        t = s.get("action_type") or ""
+        tag, color = {"notify_external": ("通知外部域", "#38bdf8"),
+                      "tech_requirement": ("技术需求修复", "#7ee7b0")}.get(t, (t, "#9fb3c0"))
+        act = esc(s.get("action") or "")
+        head = (f"<span style='color:{color}'>[{tag}]</span> "
+                f"{esc(s.get('app'))}/{esc(s.get('feature'))}")
+        return f"{head}：{act}" if act else head
     return esc(s)
 
 
