@@ -9,6 +9,10 @@ import sys
 import yaml
 
 APPLY = "--apply" in sys.argv
+# 防呆：--appl / --aply 之类拼错会静默走预演，直接报错退出
+for _a in sys.argv[1:]:
+    if _a.startswith("--a") and _a not in ("--apply",):
+        sys.exit(f"参数拼写错误：{_a}（是否想输入 --apply ？）未做任何修改。")
 # --root <dir> 便于在夹具上自测；缺省为本机 skills 根目录
 SK = os.path.expanduser("~/.agents/skills")
 if "--root" in sys.argv:
