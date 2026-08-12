@@ -1,0 +1,149 @@
+"""修复 ~/.agents/skills 下导致 "warnings loading skill configs" 的硬性缺陷。
+幂等：已修则跳过；修完用 yaml 复核 frontmatter 可解析。
+运行：./.venv/bin/python tests/fix_skill_configs.py [--apply]
+"""
+import io
+import os
+import sys
+
+import yaml
+
+APPLY = "--apply" in sys.argv
+SK = os.path.expanduser("~/.agents/skills")
+changed = []
+
+
+def read(p):
+    return io.open(p, encoding="utf-8").read()
+
+
+def write(p, s):
+    if APPLY:
+        io.open(p, "w", encoding="utf-8").write(s)
+
+
+def split_fm(s):
+    """返回 (frontmatter 文本, 分隔符, 其余)；无 frontmatter 返回 (None, None, s)。"""
+    if not s.startswith("---"):
+        return None, None, s
+    end = s.find("\n---", 3)
+    if end == -1:
+        return None, None, s
+    return s[3:end], s[end:end + 4], s[end + 4:]
+
+
+def quote_scalar(v):
+    v = v.strip()
+    if v.startswith(('"', "'")) and v.endswith(('"', "'")) and len(v) > 1:
+        return v
+    return '"' + v.replace("\\", "\\\\").replace('"', "'") + '"'
+
+
+def fix_unquoted_description(path):
+    """description 值含 ':' 未加引号导致 YAML 解析失败 → 给标量加双引号。"""
+    s = read(path)
+    fm, sep, rest = split_fm(s)
+    if fm is None:
+        return "无 frontmatter（交由 add_frontmatter 处理）"
+    try:
+        yaml.safe_load(fm)
+        return "frontmatter 已可解析，跳过"
+    except Exception:
+        pass
+    out, fixed = [], False
+    for line in fm.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("description:") and not fixed:
+            indent = line[:len(line) - len(stripped)]
+            val = stripped[len("description:"):]
+            out.append(f"{indent}description: {quote_scalar(val)}")
+            fixed = True
+        elif stripped.startswith("description_zh:"):
+            indent = line[:len(line) - len(stripped)]
+            val = stripped[len("description_zh:"):]
+            out.append(f"{indent}description_zh: {quote_scalar(val)}")
+        else:
+            out.append(line)
+    new_fm = "\n".join(out)
+    try:
+        yaml.safe_load(new_fm)
+    except Exception as e:
+        return f"修复后仍不可解析，放弃：{str(e)[:80]}"
+    write(path, "---" + new_fm + sep + rest)
+    changed.append(path)
+    return "已给 description 加引号"
+
+
+def add_frontmatter(path, name):
+    """整文件缺 frontmatter → 用首个 'Use when' 段落作为 description 补齐。"""
+    s = read(path)
+    if s.startswith("---"):
+        return "已有 frontmatter，跳过"
+    desc = ""
+    for line in s.split("\n"):
+        t = line.strip()
+        if t.startswith("Use when") or t.startswith("Use When"):
+            desc = t
+            break
+    if not desc:
+        for line in s.split("\n"):
+            t = line.strip()
+            if t and not t.startswith("#") and not t.startswith("---"):
+                desc = t
+                break
+    if not desc:
+        return "找不到可用描述，跳过"
+    fm = f"---\nname: {name}\ndescription: {quote_scalar(desc)}\n---\n\n"
+    yaml.safe_load(fm[3:fm.find(chr(10) + '---', 3)])
+    write(path, fm + s)
+    changed.append(path)
+    return f"已补 frontmatter（description {len(desc)} 字）"
+
+
+def create_skill_md_from_pkg(d, name):
+    """有 package.json 但缺 SKILL.md → 用 package.json 的 description 生成最小 SKILL.md。"""
+    sk = os.path.join(d, "SKILL.md")
+    if os.path.exists(sk):
+        return "SKILL.md 已存在，跳过"
+    import json
+    pkg_path = os.path.join(d, "package.json")
+    if not os.path.exists(pkg_path):
+        return "无 package.json，跳过"
+    pkg = json.loads(read(pkg_path))
+    desc = (pkg.get("description") or "").strip()
+    if not desc:
+        return "package.json 无 description，跳过（需人工补内容）"
+    refs = [x for x in sorted(os.listdir(d))
+            if x not in ("package.json",) and not x.startswith(".")]
+    body = (f"---\nname: {name}\ndescription: {quote_scalar(desc)}\n---\n\n"
+            f"# {name}\n\n## 说明\n\n{desc}\n\n"
+            f"## 目录内容\n\n" + "\n".join(f"- `{x}`" for x in refs) + "\n\n"
+            f"> 本 SKILL.md 由 package.json 描述重建（原安装包缺失指令体）；"
+            f"详细用法参见上述目录内的参考资料与脚本。\n")
+    write(sk, body)
+    changed.append(sk)
+    return "已由 package.json 重建 SKILL.md"
+
+
+TASKS = [
+    ("refund-kb-loop", add_frontmatter, "refund-kb-loop/SKILL.md"),
+    ("biz-rule-distill", fix_unquoted_description, "biz-rule-distill/SKILL.md"),
+    ("change-flight-prd-writing", fix_unquoted_description,
+     "change-flight-prd-writing/SKILL.md"),
+    ("tickets-platform-skill", create_skill_md_from_pkg, None),
+]
+
+print(("应用修复" if APPLY else "预演（不写盘）") + f"，根目录 {SK}\n")
+for name, fn, rel in TASKS:
+    target = os.path.join(SK, rel) if rel else os.path.join(SK, name)
+    if not os.path.exists(target):
+        print(f"- {name}: 目标不存在 {target}")
+        continue
+    if fn is create_skill_md_from_pkg:
+        msg = fn(target, name)
+    elif fn is add_frontmatter:
+        msg = fn(target, name)
+    else:
+        msg = fn(target)
+    print(f"- {name}: {msg}")
+print(f"\n{'已写入' if APPLY else '待写入'} {len(changed)} 个文件")
