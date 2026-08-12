@@ -59,6 +59,11 @@ QUOTA_OUT = ("You've reached your credit usage limit. Please upgrade your subscr
 check("识别额度耗尽输出", any(h in QUOTA_OUT.lower() for h in engine.RESOURCE_HINTS))
 check("识别鉴权类不可用", any(h in "Unauthorized, please login".lower()
                         for h in engine.RESOURCE_HINTS))
+check("策略含异常深挖与代码级根因条款",
+      "异常深挖与代码级根因" in engine.PROMPT_TEMPLATE
+      and "类全名.方法名:行号" in engine.PROMPT_TEMPLATE
+      and "~/developer/change-flight-tp" in engine.PROMPT_TEMPLATE
+      and "代码未定位" in engine.PROMPT_TEMPLATE)
 
 # ---------- 2. 钉群 Markdown 降噪 ----------
 RAW = ("### 改签履约-审计汇总-告警定时播报2026-08-07 10:30\n\n"

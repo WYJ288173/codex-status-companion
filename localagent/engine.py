@@ -29,6 +29,11 @@ P4 未取证兜底：若记忆、skill、MCP 全部不可用，必须在 evidenc
    evidence 数组必须非空：每个取证动作一条记录，含动作与关键发现；取证失败也要记录，finding 写明失败原因。
 7. BCP/审计播报类告警（含告警码如 TRP_xxx_ADUIT / FLIGGY_xxx_ADUIT）→ 优先用 jarvis MCP（list_audit_scripts 按 monitorIdentifier=告警码、list_audit_rules_by_script、list_audit_rule_check_points 等）深挖规则定义与校验点，再结合订单/日志 skill 取证；
    禁止用 WebFetch 抓取 bcp.alibaba-inc.com 页面（SSO 拦截，属无效取证）；上下文给出沉淀解决方案时，必须按方案步骤取证，suggestions 的 app/feature 与授权条目保持一致。
+8. 异常深挖与代码级根因（报警含 tracerId 时必须执行）：flyeye 日志命中 Java 异常（NullPointerException / TimeoutException / 业务异常等）时，不得止步于"有异常"，必须：
+   a. 提取完整堆栈：异常类名、抛出点 类全名.方法名:行号、关键调用链帧；日志被截断时换关键词/缩小时间窗重查，直到拿到堆栈帧；
+   b. 到本机代码仓库定位源码（grep 类名/日志文案）：改签底座 ~/developer/change-flight-tp、flycp ~/developer/flycp、atr ~/developer/atr、flybuy ~/developer/flybuy、flybp ~/developer/flybp、flyragg ~/developer/flyragg、flyasp ~/developer/flyasp、atus ~/developer/atus、atr ~/developer/atr；
+   c. 结合抛出点上下文代码分析具体报错：哪个对象为 null / 哪行抛出 / 什么条件触发，写进 evidence（含 文件:行号 与关键代码摘录）；
+   d. conclusion 必须落到代码级根因（如"XxxServiceImpl.java:123 处 order.getOffer() 为 null，因上游未回填 offer"）；确实定位不到源码时在 evidence 标注「代码未定位」及原因，禁止只给"某处 NPE 需排查"这类无落点结论。
 
 取证完成后严格只输出 JSON：
 {{"normal": bool, "conclusion": str（一句话明确结论+依据，≤60字，精炼不啰嗦）,
