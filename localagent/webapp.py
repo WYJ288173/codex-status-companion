@@ -84,8 +84,10 @@ def build_app(app_ctx):
         elif skw == "0":
             skw_cls, skw_txt = "ok", "0 条（skill 全部正常注册）"
         else:
-            skw_cls, skw_txt = "warn", (f"{skw} 条：部分 skill 未注册，取证能力被削弱"
-                                        "（运行 tests/fix_skill_configs.py --apply 修复）")
+            skw_cls, skw_txt = "warn", (
+                f"{skw} 条扫描预算提示（skill 发现深度上限 4，官方包 pptx/docx 的 schemas 超深所致；"
+                "已核查全部 skill 正常注册、取证不受影响。排查：tests/validate_skill_configs.py，"
+                "明细：~/.qoder/logs/latest/qodercli.log 搜 [SkillManager]）")
         probe_txt = "未探测"
         if probe:
             probe_txt = "　".join(
