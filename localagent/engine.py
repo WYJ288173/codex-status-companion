@@ -212,7 +212,8 @@ async def _run_engine(cfg, name, prompt, db=None, run_id=None, model=None, timeo
     if model:
         argv += [_model_flag(cfg, name), model]
     proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        *argv, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     raw = out.decode()
     err_text = err.decode()
@@ -342,7 +343,8 @@ async def detect_versions(cfg):
             continue
         try:
             proc = await asyncio.create_subprocess_exec(
-                cmd[0], "--version", stdout=asyncio.subprocess.PIPE,
+                cmd[0], "--version", stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE)
             o, err = await asyncio.wait_for(proc.communicate(), timeout=10)
             txt = (o.decode() or err.decode()).strip().splitlines()
