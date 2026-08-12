@@ -188,6 +188,19 @@ TASKS = [
      "change-flight-biz-rule-distill/SKILL.md"),
 ]
 
+# --rollback：把所有 SKILL.md.bak 还原回 SKILL.md（撤销有损裁剪）
+if "--rollback" in sys.argv:
+    import glob
+    n = 0
+    for bak in sorted(glob.glob(os.path.join(SK, "*", "SKILL.md.bak"))):
+        target = bak[:-4]
+        io.open(target, "w", encoding="utf-8").write(io.open(bak, encoding="utf-8").read())
+        os.remove(bak)
+        print("已还原:", target)
+        n += 1
+    print(f"共还原 {n} 个文件" if n else "没有 .bak 备份，无需还原")
+    sys.exit(0)
+
 print(("应用修复" if APPLY else "预演（不写盘）") + f"，根目录 {SK}\n")
 for name, fn, rel in TASKS:
     target = os.path.join(SK, rel) if rel else os.path.join(SK, name)
