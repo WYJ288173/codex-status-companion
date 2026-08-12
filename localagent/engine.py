@@ -217,6 +217,8 @@ async def _run_engine(cfg, name, prompt, db=None, run_id=None, model=None, timeo
 async def _run_with_downgrade(cfg, db, prompt, run_id):
     """按「引擎链 × 模型链」逐级降级执行；返回 (result, engine, model)。
     资源不可用先同引擎换模型，再换引擎；全部资源不可用抛 EngineUnavailable。"""
+    # 深度取证（堆栈+源码定位）实测需 20-40 分钟，15 分钟不够；可经 engines.timeout_seconds 调整
+    timeout = int(cfg.engines.get("timeout_seconds", 1800))
     last_real_error = None
     unavailable = []
     for ei, name in enumerate(engine_chain(cfg)):
@@ -228,7 +230,8 @@ async def _run_with_downgrade(cfg, db, prompt, run_id):
                          f"{name}/{model or 'default'}",
                          f"前序不可用，降级重试：{'; '.join(unavailable)[-200:]}", run_id)
             try:
-                result = await _run_engine(cfg, name, prompt, db, run_id, model=model)
+                result = await _run_engine(cfg, name, prompt, db, run_id, model=model,
+                                           timeout=timeout)
                 return result, name, model
             except EngineUnavailable as e:
                 unavailable.append(str(e)[:120])
