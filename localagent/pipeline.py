@@ -247,7 +247,8 @@ class Pipeline:
                "group": (m0["group_name"] if m0 else run0["source"]) or "",
                "sender": (m0["sender"] if m0 else "rerun") or "rerun",
                "text": text,
-               "at_me": run0["trigger_type"] == "dingtalk_at_me"}
+               # 重跑是用户显式动作，不受「非@我静默」门禁约束
+               "at_me": True}
         db.audit("task", "rerun_submitted", msg["group"], f"from {run_id}", run_id)
         return await self.process(msg)
 
