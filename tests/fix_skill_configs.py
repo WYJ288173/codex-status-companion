@@ -128,12 +128,60 @@ def create_skill_md_from_pkg(d, name):
     return "已由 package.json 重建 SKILL.md"
 
 
+MAX_DESC = 512
+SAFE_DESC = 500
+
+
+def trim_long_description(path):
+    """description 超过 512 字符会触发 CLI skill 配置告警 → 按句子边界裁剪到 <=500。
+    有损修改，写盘前备份 SKILL.md.bak。"""
+    s = read(path)
+    fm, sep, rest = split_fm(s)
+    if fm is None:
+        return "无 frontmatter，跳过"
+    try:
+        meta = yaml.safe_load(fm) or {}
+    except Exception as e:
+        return f"frontmatter 不可解析，先修引号：{str(e)[:60]}"
+    desc = str(meta.get("description") or "")
+    if len(desc) <= MAX_DESC:
+        return f"description {len(desc)} 字符，未超限，跳过"
+    cut = desc[:SAFE_DESC]
+    for mark in ("。", "；", ". ", "; "):
+        i = cut.rfind(mark)
+        if i > SAFE_DESC * 0.5:
+            cut = cut[:i + len(mark)].rstrip()
+            break
+    meta["description"] = cut
+    order = ["name", "description"] + [k for k in meta if k not in ("name", "description")]
+    lines = []
+    for k in order:
+        if k not in meta:
+            continue
+        v = meta[k]
+        lines.append(f"{k}: {quote_scalar(str(v))}" if isinstance(v, str) else f"{k}: {v}")
+    new_fm = "\n" + "\n".join(lines)
+    try:
+        yaml.safe_load(new_fm)
+    except Exception as e:
+        return f"重写后不可解析，放弃：{str(e)[:60]}"
+    if APPLY:
+        io.open(path + ".bak", "w", encoding="utf-8").write(s)
+    write(path, "---" + new_fm + sep + rest)
+    changed.append(path)
+    return f"description {len(desc)} -> {len(cut)} 字符（原文备份 .bak）"
+
+
 TASKS = [
     ("refund-kb-loop", add_frontmatter, "refund-kb-loop/SKILL.md"),
     ("biz-rule-distill", fix_unquoted_description, "biz-rule-distill/SKILL.md"),
     ("change-flight-prd-writing", fix_unquoted_description,
      "change-flight-prd-writing/SKILL.md"),
     ("tickets-platform-skill", create_skill_md_from_pkg, None),
+    # 实测告警真因：description 超过 512 字符（恰好这 2 个）
+    ("a1", trim_long_description, "a1/SKILL.md"),
+    ("change-flight-biz-rule-distill", trim_long_description,
+     "change-flight-biz-rule-distill/SKILL.md"),
 ]
 
 print(("应用修复" if APPLY else "预演（不写盘）") + f"，根目录 {SK}\n")
