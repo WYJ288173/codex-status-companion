@@ -78,6 +78,14 @@ def build_app(app_ctx):
             probe = json.loads(db.get_state("engine_probe", "{}") or "{}")
         except Exception:
             probe = {}
+        skw = db.get_state("skill_config_warnings")
+        if skw is None:
+            skw_cls, skw_txt = "", "未探测"
+        elif skw == "0":
+            skw_cls, skw_txt = "ok", "0 条（skill 全部正常注册）"
+        else:
+            skw_cls, skw_txt = "warn", (f"{skw} 条：部分 skill 未注册，取证能力被削弱"
+                                        "（运行 tests/fix_skill_configs.py --apply 修复）")
         probe_txt = "未探测"
         if probe:
             probe_txt = "　".join(
@@ -109,6 +117,7 @@ def build_app(app_ctx):
         <tr><td>上次轮询 / 最近命中</td><td>{db.get_state('dws_last_poll','-') or '-'} / {db.get_state('dws_last_hit','-') or '-'}</td></tr>
         <tr><td>引擎可用性</td><td>{db.get_state('engine_versions','-')}</td></tr>
         <tr><td>引擎/模型探针</td><td>{probe_txt}</td></tr>
+        <tr><td>Skill 配置告警</td><td class="{skw_cls}">{skw_txt}</td></tr>
         <tr><td>引擎资源不可用（可重试）</td><td class="{'warn' if unavail else 'ok'}">{unavail} 条</td><td>{unavail_link}</td></tr>
         <tr><td>累计执行 / 今日异常 / 待确认</td><td>{runs[0]['c']} / {today_alerts[0]['c']} /
             <span class="{'warn' if pending else 'ok'}">{pending}</span></td></tr>

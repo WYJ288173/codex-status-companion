@@ -167,7 +167,20 @@ def engine_chain(cfg):
     return chain
 
 
-async def _run_engine(cfg, name, prompt, db=None, run_id=None, model=None, timeout=900):
+SKILL_WARN_RE = re.compile(r"(\d+)\s+warnings?\s+loading\s+skill\s+configs", re.I)
+
+
+def parse_skill_warnings(stderr_text):
+    """从引擎 stderr 解析 skill 配置告警数；未出现该提示时返回 None。
+    有告警意味着部分 skill 未注册/配置损坏，会直接削弱取证能力，需在后台可见。"""
+    if not stderr_text:
+        return None
+    m = SKILL_WARN_RE.search(stderr_text)
+    return int(m.group(1)) if m else None
+
+
+async def _run_engine(cfg, name, prompt, db=None, run_id=None, model=None, timeout=900,
+                      stats=None):
     cmd = cfg.engine_cmd(name)
     if not cmd:
         raise RuntimeError(f"engine {name} 未配置")
@@ -178,16 +191,21 @@ async def _run_engine(cfg, name, prompt, db=None, run_id=None, model=None, timeo
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     raw = out.decode()
+    err_text = err.decode()
+    if stats is not None:
+        warns = parse_skill_warnings(err_text)
+        if warns is not None:
+            stats["skill_warnings"] = warns
     result = _extract_json(raw)
     if result is None:
         tag = f"{name}" + (f"/{model}" if model else "")
         if db:
             db.audit("engine", "raw_output", tag,
-                     f"stdout={raw[-800:]} | stderr={err.decode()[-300:]}", run_id)
-        low = (raw + " " + err.decode()).lower()
+                     f"stdout={raw[-800:]} | stderr={err_text[-300:]}", run_id)
+        low = (raw + " " + err_text).lower()
         if any(h in low for h in RESOURCE_HINTS):
             raise EngineUnavailable(f"{tag} 资源不可用（额度/限流/鉴权）：{raw.strip()[:150]}")
-        raise RuntimeError(f"{tag} 输出无有效 JSON: {raw[:150]} / err={err.decode()[:100]}")
+        raise RuntimeError(f"{tag} 输出无有效 JSON: {raw[:150]} / err={err_text[:100]}")
     return result
 
 
@@ -260,6 +278,7 @@ PROBE_PROMPT = ('Reply with exactly this JSON and nothing else: '
 async def probe_engines(cfg, db=None):
     """最小探针：逐个引擎 × 候选模型实跑一次，记录可用性到 conn_state.engine_probe。"""
     out = {}
+    stats = {}
     for name in engine_chain(cfg):
         if not cfg.engine_cmd(name):
             out[name] = "未配置"
@@ -268,7 +287,7 @@ async def probe_engines(cfg, db=None):
             key = f"{name}/{model or 'default'}"
             try:
                 await _run_engine(cfg, name, PROBE_PROMPT, None, None,
-                                  model=model, timeout=180)
+                                  model=model, timeout=180, stats=stats)
                 out[key] = "ok"
             except EngineUnavailable as e:
                 out[key] = f"资源不可用: {str(e)[:80]}"
@@ -277,6 +296,11 @@ async def probe_engines(cfg, db=None):
     if db is not None:
         db.set_state("engine_probe", json.dumps(out, ensure_ascii=False))
         db.set_state("engine_probe_at", now())
+        if "skill_warnings" in stats:
+            db.set_state("skill_config_warnings", str(stats["skill_warnings"]))
+            if stats["skill_warnings"]:
+                db.audit("engine", "skill_config_warnings", "",
+                         f"{stats['skill_warnings']} 个 skill 配置告警，部分 skill 未注册，取证能力被削弱")
         db.audit("engine", "engines_probed", "", json.dumps(out, ensure_ascii=False)[:400])
     return out
 

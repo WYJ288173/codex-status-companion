@@ -54,10 +54,15 @@ class Cfg:
         return next((e["cmd"] for e in self.engines["list"] if e["name"] == name), None)
 
 
-async def fake_run(cfg, name, prompt, db=None, run_id=None, model=None, timeout=900):
+async def fake_run(cfg, name, prompt, db=None, run_id=None, model=None, timeout=900,
+                   stats=None):
     """替换真实子进程：按 引擎/模型 返回预设输出，走真实的 JSON 提取与资源不可用判定。"""
     key = "codex" if name == "codex" else (model or "default")
     raw = cfg.outputs.get(key, "")
+    if stats is not None and getattr(cfg, "stderr_warns", None) is not None:
+        w = engine.parse_skill_warnings(cfg.stderr_warns)
+        if w is not None:
+            stats["skill_warnings"] = w
     result = engine._extract_json(raw)
     if result is None:
         tag = f"{name}/{model or 'default'}"
@@ -188,6 +193,25 @@ check("探针区分资源不可用与失败",
 saved = json.loads(db.get_state("engine_probe", "{}"))
 check("探针结果落 conn_state", saved == out and db.get_state("engine_probe_at"))
 
+# ---------- 8b. skill 配置告警：解析 / 落库 / 状态页 ----------
+check("解析 skill 告警数",
+      engine.parse_skill_warnings("2 warnings loading skill configs. Use /skills to see details.") == 2)
+check("单数形式也可解析", engine.parse_skill_warnings("1 warning loading skill configs") == 1)
+check("无告警返回 None", engine.parse_skill_warnings("all good") is None
+      and engine.parse_skill_warnings("") is None)
+db_w = new_db()
+cfg_w = Cfg({"default": OK_JSON, "M1": OK_JSON, "M2": OK_JSON, "codex": OK_JSON})
+cfg_w.stderr_warns = "2 warnings loading skill configs. Use /skills to see details."
+asyncio.run(engine.probe_engines(cfg_w, db_w))
+check("探针落库 skill 告警数", db_w.get_state("skill_config_warnings") == "2",
+      str(db_w.get_state("skill_config_warnings")))
+check("有告警时写审计", len(audits(db_w, "skill_config_warnings")) == 1)
+db_ok = new_db()
+cfg_ok = Cfg({"default": OK_JSON, "M1": OK_JSON, "M2": OK_JSON, "codex": OK_JSON})
+cfg_ok.stderr_warns = "no warnings here"
+asyncio.run(engine.probe_engines(cfg_ok, db_ok))
+check("无告警提示时不落库", db_ok.get_state("skill_config_warnings") is None)
+
 # ---------- 9. 后台呈现：状态页与历史页 ----------
 from localagent.webapp import build_app
 
@@ -221,6 +245,7 @@ for rt in app.routes:
         ep.setdefault(getattr(rt, "path", ""), rt.endpoint)
 st = ep["/"]().body.decode()
 check("状态页展示引擎/模型探针", "引擎/模型探针" in st and "qodercli/M1=ok" in st)
+check("状态页展示 Skill 配置告警行", "Skill 配置告警" in st)
 check("状态页展示可重试计数与入口", "引擎资源不可用（可重试）" in st
       and "status_f=engine_unavailable" in st)
 hi = ep["/history"](days=7, status_f="engine_unavailable").body.decode()
