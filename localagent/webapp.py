@@ -3,7 +3,7 @@ import os
 import resource
 import threading
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import HTMLResponse, FileResponse
 
 from .db import now
@@ -178,7 +178,7 @@ def build_app(app_ctx):
         body += ("<script>async function rerun(run){"
                  "if(!confirm('引擎资源不可用，按原始报警内容重跑分析？将自动按模型降级链选择可用模型。'))return;"
                  "const r=await fetch('/api/rerun/'+run,{method:'POST'});const j=await r.json();"
-                 "alert(j.run_id?('已重跑：'+j.run_id):('失败：'+(j.error||'')));location.reload()}</script>")
+                 "alert(j.submitted?('已提交重跑，后台执行中（原 run：'+j.run_id+'）'):('失败：'+(j.error||'')));location.reload()}</script>")
         body += ("<script>async function retry(run){if(!confirm('对该失败任务发起重新分析？'))return;"
                  "const r=await fetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},"
                  "body:JSON.stringify({note:'失败重试'})});const j=await r.json();"
@@ -553,21 +553,26 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                     + rdr.render_report_html(data, os.path.relpath(fp, base)))
 
     @app.post("/api/reanalyze/{run_id}")
-    async def reanalyze(run_id: str, request: Request):
+    async def reanalyze(run_id: str, request: Request, bg: BackgroundTasks):
         data = await request.json()
         note = (data.get("note") or "").strip()
         if not note:
             return {"error": "请输入补充信息"}
-        new_run = await app_ctx.pipeline.reanalyze(run_id, note)
-        return {"new_run": new_run} if new_run else {"error": "原记录不存在"}
+        prep = app_ctx.pipeline._reanalyze_prepare(run_id, note)
+        if not prep:
+            return {"error": "原记录不存在"}
+        new_run, ctx = prep
+        # 分析放后台：客户端断开不再中断分析
+        bg.add_task(app_ctx.pipeline._reanalyze_execute, new_run, ctx)
+        return {"new_run": new_run}
 
     @app.post("/api/rerun/{run_id}")
-    async def api_rerun(run_id: str):
-        r = await app_ctx.pipeline.rerun(run_id)
-        if r is None:
+    async def api_rerun(run_id: str, bg: BackgroundTasks):
+        run0 = app_ctx.db.one("SELECT run_id FROM runs WHERE run_id=?", run_id)
+        if not run0:
             return {"error": "原记录不存在或无原始消息内容"}
-        return {"run_id": r.get("run_id"), "reason": r.get("reason"),
-                "handled": bool(r.get("handled"))}
+        bg.add_task(app_ctx.pipeline.rerun, run_id)
+        return {"submitted": True, "run_id": run_id}
 
     @app.post("/api/alerts/{alert_id}/trigger_solution")
     async def alert_trigger_solution(alert_id: str, request: Request):

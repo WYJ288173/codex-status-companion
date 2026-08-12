@@ -152,8 +152,8 @@ class Pipeline:
             self._reply_if_allowed(msg["group"], result, run_id)
         return {"handled": True, "run_id": run_id, "normal": result.get("normal")}
 
-    async def reanalyze(self, orig_run_id, note):
-        """用户认为分析不准时，携带用户输入重新触发分析。"""
+    def _reanalyze_prepare(self, orig_run_id, note):
+        """同步准备：校验原 run、拼装重分析文本、落 run 记录。返回 (run_id, ctx) 或 None。"""
         db = self.db
         run0 = db.one("SELECT * FROM runs WHERE run_id=?", orig_run_id)
         if not run0:
@@ -179,6 +179,16 @@ class Pipeline:
                   engine=None, engine_version=None, started_at=now(),
                   finished_at=None, report_path=None, error_msg=None,
                   source_text=text)
+        return run_id, {"run0": run0, "m0": m0, "text": text, "note": note,
+                        "audit_parsed": audit_parsed, "codes": codes,
+                        "matched_sols": matched_sols}
+
+    async def _reanalyze_execute(self, run_id, ctx):
+        """后台执行重分析：与客户端连接解耦，断开也不中断。"""
+        db = self.db
+        run0, m0, text, note = ctx["run0"], ctx["m0"], ctx["text"], ctx["note"]
+        audit_parsed, codes, matched_sols = ctx["audit_parsed"], ctx["codes"], ctx["matched_sols"]
+        orig_run_id = run0["run_id"]
         try:
             result, eng, ver = await engine.analyze(
                 self.cfg, db, {"text": text, "source": "reanalyze",
@@ -189,11 +199,11 @@ class Pipeline:
             db.update("runs", "run_id", run_id, status="engine_unavailable",
                       finished_at=now(), error_msg=str(e)[:500])
             db.audit("engine", "engine_unavailable_run", run0["source"], str(e)[:300], run_id)
-            return run_id
+            return
         except Exception as e:
             db.update("runs", "run_id", run_id, status="failed",
                       finished_at=now(), error_msg=str(e))
-            return run_id
+            return
         reports.write_report(self.cfg, db, run_id, result, run0["source"], eng)
         db.conn.execute("UPDATE alerts SET status='reanalyzed' "
                         "WHERE run_id=? AND status IN ('pending','no_problem')",
@@ -231,6 +241,14 @@ class Pipeline:
             self.notifier.raise_alerts(run_id, run0["source"], result.get("anomalies", []))
             self._reply_if_allowed(run0["source"], result, run_id)
         db.audit("task", "reanalyze", orig_run_id, note[:200], run_id)
+
+    async def reanalyze(self, orig_run_id, note):
+        """用户认为分析不准时，携带用户输入重新触发分析（同步等待完成，供测试/内部调用）。"""
+        prep = self._reanalyze_prepare(orig_run_id, note)
+        if not prep:
+            return None
+        run_id, ctx = prep
+        await self._reanalyze_execute(run_id, ctx)
         return run_id
 
     async def rerun(self, run_id):
