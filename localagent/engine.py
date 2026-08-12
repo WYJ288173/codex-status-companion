@@ -34,6 +34,11 @@ P4 未取证兜底：若记忆、skill、MCP 全部不可用，必须在 evidenc
    b. 到本机代码仓库定位源码（grep 类名/日志文案）：改签底座 ~/developer/change-flight-tp、flycp ~/developer/flycp、atr ~/developer/atr、flybuy ~/developer/flybuy、flybp ~/developer/flybp、flyragg ~/developer/flyragg、flyasp ~/developer/flyasp、atus ~/developer/atus、atr ~/developer/atr；
    c. 结合抛出点上下文代码分析具体报错：哪个对象为 null / 哪行抛出 / 什么条件触发，写进 evidence（含 文件:行号 与关键代码摘录）；
    d. conclusion 必须落到代码级根因（如"XxxServiceImpl.java:123 处 order.getOffer() 为 null，因上游未回填 offer"）；确实定位不到源码时在 evidence 标注「代码未定位」及原因，禁止只给"某处 NPE 需排查"这类无落点结论。
+9. 反编造硬约束（证据可回溯，违反即报告作废）：
+   a. evidence 引用的每条日志必须来自本次实际查询结果，且带可回溯要素：时间戳（精确到毫秒）、应用名、rpc id 或日志原文摘录；禁止凭记忆/常识/其他 trace 的内容补写证据；
+   b. 因果链（A 异常导致 B 异常）成立的必要条件：A、B 均有日志证据，且同属目标 trace / rpc 链、时间先后吻合；任一环节缺证据时，只能写"伴生现象"或"未证实关联"，禁止写成因果；
+   c. 下结论前自查：conclusion/anomalies 里出现的每个异常类名、错误信息、中间件名，是否都能在 evidence 中找到带时间戳的出处？找不到的一律删除或降级为"未证实"；
+   d. 未能独立验证的事实（如订单终态因工具不可用没查到）必须在 evidence 显式标注「未验证」，禁止用模糊表述掩盖缺口。
 
 取证完成后严格只输出 JSON：
 {{"normal": bool, "conclusion": str（一句话明确结论+依据，≤60字，精炼不啰嗦）,
