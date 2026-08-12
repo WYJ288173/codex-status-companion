@@ -9,7 +9,10 @@ import sys
 import yaml
 
 APPLY = "--apply" in sys.argv
+# --root <dir> 便于在夹具上自测；缺省为本机 skills 根目录
 SK = os.path.expanduser("~/.agents/skills")
+if "--root" in sys.argv:
+    SK = os.path.abspath(sys.argv[sys.argv.index("--root") + 1])
 changed = []
 
 
