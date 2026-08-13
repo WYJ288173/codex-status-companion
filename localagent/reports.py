@@ -48,6 +48,13 @@ def write_report(cfg, db, run_id, result, source, engine, kb_refs=None, audit_li
     os.makedirs(os.path.join(cfg.workspace, rel), exist_ok=True)
     verdict = "无问题" if result.get("normal") else "有问题"
     conclusion = result.get("conclusion") or result.get("summary", "")
+    corr = result.get("correlation")
+    if corr:
+        kind = str(corr.get("type_key", "")).split(":", 1)[-1]
+        impact = ("单订单重试，影响单一用户" if corr.get("same_order")
+                  else f"多订单批量信号（{len(corr.get('orders', []))} 订单）")
+        conclusion = (f"{conclusion}\n\n> 同类报警关联：近 {corr.get('window_min', 10)} 分钟 {kind} 类共 "
+                      f"{corr.get('count', 0)} 条，涉及订单 {len(corr.get('orders', []))} 个，影响面：{impact}")
     ev = result.get("evidence") or []
     evidence = "\n".join(f"- 【{e.get('action')}】{e.get('finding')}" for e in ev) or "- 无取证记录"
     if result.get("evidence_warning"):
@@ -69,6 +76,7 @@ def write_report(cfg, db, run_id, result, source, engine, kb_refs=None, audit_li
                         "summary": result.get("summary", ""),
                         "evidence": ev, "anomalies": result.get("anomalies", []),
                         "suggestions": [s for s in result.get("suggestions", []) if s],
+                        "correlation": result.get("correlation"),
                         "evidence_warning": result.get("evidence_warning", ""),
                         "audit": audit_lines or []}, f, ensure_ascii=False, indent=1)
     except Exception:

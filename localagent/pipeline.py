@@ -1,6 +1,6 @@
 import json
 
-from . import authlist, engine, reports
+from . import authlist, correlate, engine, reports
 from . import solutions as solmod
 from .db import new_id, now
 from .matcher import match_alert, parse_sunfire_alert, parse_audit_broadcast, Cooldowns
@@ -95,7 +95,15 @@ class Pipeline:
                   source_text=msg["text"], parsed_json=audit_json)
         db.audit("dingtalk", "msg_matched", msg["group"], rule_hit, run_id)
 
+        corr = correlate.build_context(db, msg["text"], codes, run_id=run_id)
+        if corr:
+            db.audit("task", "correlation_detected", msg["group"],
+                     json.dumps({k: corr[k] for k in ("type_key", "count", "orders", "batch")},
+                                ensure_ascii=False)[:300], run_id)
         ctx_text = msg["text"]
+        corr_ctx = correlate.render_context(corr)
+        if corr_ctx:
+            ctx_text = corr_ctx + "\n\n" + ctx_text
         sol_ctx = solmod.render_solution_context(matched_sols)
         if sol_ctx:
             ctx_text = sol_ctx + "\n\n" + ctx_text
@@ -106,6 +114,7 @@ class Pipeline:
                                          "alert": parsed,
                                          "audit_broadcast": audit_parsed,
                                          "alert_codes": codes,
+                                         "correlation": corr,
                                          "matched_solutions": [
                                              {"code": x["code"], "write_gate": bool(x.get("enabled")),
                                               "write_entry_id": x.get("write_entry_id")}
@@ -130,6 +139,11 @@ class Pipeline:
             self.notifier.raise_alerts(run_id, msg["group"], fail_result["anomalies"])
             return {"handled": True, "run_id": run_id, "status": "failed"}
 
+        if corr:
+            result["correlation"] = corr
+            if correlate.apply_batch_escalation(result, corr):
+                db.audit("task", "batch_escalated", msg["group"],
+                         f"{corr['count']}条同类/{len(corr['orders'])}订单，升级P2", run_id)
         if parsed and parsed.get("trace_id") and not result.get("evidence"):
             result.setdefault("evidence_warning",
                               "⚠️ 报警含 traceId 但引擎未产出日志取证，结论置信度不足；"

@@ -337,6 +337,35 @@ async function gateSol(code){const r=await fetch('/api/solutions/gate/'+code,{me
 headers:{'Content-Type':'application/json'},body:JSON.stringify({})});const j=await r.json();
 alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));location.reload()}
 </script>"""
+        # 同类报警聚合卡片（近 10 分钟归组研判）
+        from . import correlate as corrmod
+        try:
+            cutoff10 = (datetime.now(CST) - timedelta(minutes=10)).isoformat(timespec="seconds")
+            recent = db.q("SELECT run_id, source_text FROM runs WHERE started_at >= ? LIMIT 200",
+                          cutoff10)
+            groups = {}
+            for r in recent:
+                key = corrmod.family_key(r["source_text"] or "")
+                if key:
+                    g = groups.setdefault(key, {"n": 0, "orders": set()})
+                    g["n"] += 1
+                    g["orders"] |= set(corrmod.extract_orders(r["source_text"]))
+            for key, g in groups.items():
+                if g["n"] < 2:
+                    continue
+                kind = key.split(":", 1)[1]
+                m = len(g["orders"])
+                if m >= 2:
+                    impact = f"<b style='color:#f87171'>多订单批量信号（{m} 订单），重点排查发布/变更关联</b>"
+                    style = "border-left:4px solid #f87171"
+                else:
+                    impact = "单订单重试，影响单一用户"
+                    style = "border-left:4px solid #f59e0b"
+                body += (f"<div class='card' style='{style};padding:8px 12px;margin:6px 0'>"
+                         f"⚠ 同类报警聚合（近10分钟）：{kind} 类 {g['n']} 条 / 涉及订单 {m} 个 / "
+                         f"影响面：{impact}</div>")
+        except Exception:
+            pass
         pr_rows = db.q("SELECT ae.*, r.report_path AS report_path FROM auth_exec ae "
                         "LEFT JOIN runs r ON ae.run_id=r.run_id "
                         "WHERE ae.exec_result='pending_reply' AND ae.ts >= ? ORDER BY ae.id DESC LIMIT 100",
