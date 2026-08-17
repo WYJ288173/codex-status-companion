@@ -207,6 +207,8 @@ check("失败卡片重新分析免输入（retryFailed）",
       "async function retryFailed" in src and "retryFailed('{_esc(m['run_id'])}')" in src)
 check("悬浮窗打开页面走 /api/open（防小窗自身导航）",
       "api/open?path=" in petsrc and "@app.get(\"/api/open\")" in src)
+check("openU 不再回退 pywebview api 桥", "a.open_url(path)" not in petsrc)
+check("悬浮窗导航守卫存在", "pet_nav_guard_restored" in petsrc and "w.load_html(html)" in petsrc)
 check("卡片展示告警原文时间+采集时间", "alert_time_of" in src and "采集 {recv_t}" in src)
 
 from localagent.webapp import alert_time_of

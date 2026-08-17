@@ -30,7 +30,7 @@ function srcOf(st){return ASSETS+st+'.'+(EXT[st]||'png')}
 let lastToastTs='', lastReport='', pinned=false, paused=false, curStatus='', S=null, prevPending=0;
 function el(id){return document.getElementById(id)}
 function api(){return window.pywebview&&window.pywebview.api}
-function openU(path){fetch(base+'/api/open?path='+encodeURIComponent(path)).catch(()=>{const a=api(); if(a) a.open_url(path)})}
+function openU(path){fetch(base+'/api/open?path='+encodeURIComponent(path)).catch(()=>{})}
 const img=el('img');
 img.onerror=()=>{img.style.display='none';el('dot').style.display='block'};
 img.src=srcOf('idle');
@@ -224,6 +224,27 @@ class PetUI:
         api = _Api(self.db, self.port)
         w = webview.create_window(js_api=api, **kwargs)
         api.window = w
+
+        # 导航守卫：WKWebView 偶发把点击变成窗内导航（小窗整窗变成管理页），
+        # 一旦离开初始页立即重注入原 HTML 恢复状态灯
+        nav = {"home": None}
+
+        def _guard():
+            try:
+                url = w.get_current_url()
+                if nav["home"] is None:
+                    nav["home"] = url
+                elif url != nav["home"]:
+                    self.db.audit("ui", "pet_nav_guard_restored", "", str(url)[:120])
+                    nav["home"] = None
+                    w.load_html(html)
+            except Exception:
+                pass
+
+        try:
+            w.events.loaded += _guard
+        except Exception:
+            pass
 
         def _save_pos():
             try:
