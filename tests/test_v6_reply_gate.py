@@ -4,6 +4,7 @@
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -209,6 +210,29 @@ check("悬浮窗打开页面走 /api/open（防小窗自身导航）",
       "api/open?path=" in petsrc and "@app.get(\"/api/open\")" in src)
 check("openU 不再回退 pywebview api 桥", "a.open_url(path)" not in petsrc)
 check("悬浮窗导航守卫存在", "pet_nav_guard_restored" in petsrc and "w.load_html(html)" in petsrc)
+check("单击不再固定气泡（防文本面板覆盖图标）", "pinned" not in petsrc)
+
+# DOM 仿真：stub DOM 后执行真实 pet 脚本，验证单击/悬停/toast 行为
+import shutil
+import subprocess
+import tempfile
+node_bin = shutil.which("node")
+if node_bin:
+    from localagent.pet import HTML as PET_HTML
+    sim_js = re.search(r"<script>(.*)</script>", PET_HTML, re.S).group(1)
+    sim_js = (sim_js.replace("PORT", "8765")
+              .replace("ASSETS_URL", "http://127.0.0.1:8765/assets/character/")
+              .replace("EXT_MAP", "{}"))
+    sim_path = os.path.join(tempfile.gettempdir(), "la_pet_sim.js")
+    with open(sim_path, "w") as f:
+        f.write(sim_js)
+    r = subprocess.run([node_bin, os.path.join(os.path.dirname(__file__), "pet_dom_sim.js"),
+                        sim_path], capture_output=True, text=True, timeout=30)
+    check("pet DOM 仿真（单击不弹气泡/悬停可用/toast 走 api）",
+          r.returncode == 0 and "PET_DOM_SIM_OK" in r.stdout,
+          (r.stdout + r.stderr)[-300:])
+else:
+    print("SKIP node 不可用，跳过 pet DOM 仿真")
 check("卡片展示告警原文时间+采集时间", "alert_time_of" in src and "采集 {recv_t}" in src)
 
 from localagent.webapp import alert_time_of

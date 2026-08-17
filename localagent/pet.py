@@ -27,7 +27,7 @@ const base='http://127.0.0.1:PORT';
 const ASSETS='ASSETS_URL';
 const EXT=EXT_MAP;
 function srcOf(st){return ASSETS+st+'.'+(EXT[st]||'png')}
-let lastToastTs='', lastReport='', pinned=false, paused=false, curStatus='', S=null, prevPending=0;
+let lastToastTs='', lastReport='', paused=false, curStatus='', S=null, prevPending=0;
 function el(id){return document.getElementById(id)}
 function api(){return window.pywebview&&window.pywebview.api}
 function openU(path){fetch(base+'/api/open?path='+encodeURIComponent(path)).catch(()=>{})}
@@ -42,8 +42,7 @@ function bubbleText(s,n){
 }
 function renderBubble(){
  const b=el('bubble');
- if(S && pinned) { b.textContent=bubbleText(S,S.pending.length); b.style.display='block'; }
- else if(!pinned && b.dataset.hover==='1' && S){ b.textContent=bubbleText(S,S.pending.length); b.style.display='block'; }
+ if(b.dataset.hover==='1' && S){ b.textContent=bubbleText(S,S.pending.length); b.style.display='block'; }
  else b.style.display='none';
 }
 function flashToast(text){
@@ -85,8 +84,7 @@ el('toast').addEventListener('click',()=>openU('/alerts'));
 img.addEventListener('dblclick',()=>openU('/'));
 el('dot').addEventListener('dblclick',()=>openU('/'));
 el('wrap').addEventListener('click',e=>{
- if(el('menu').style.display==='block'){el('menu').style.display='none';return}
- pinned=!pinned; renderBubble();
+ if(el('menu').style.display==='block'){el('menu').style.display='none'}
 });
 el('wrap').addEventListener('mouseenter',()=>{el('bubble').dataset.hover='1';renderBubble()});
 el('wrap').addEventListener('mouseleave',()=>{el('bubble').dataset.hover='0';renderBubble()});
