@@ -58,7 +58,10 @@ class DwsDingTalk:
         while True:
             try:
                 await self.poll_once(last)
-                last = now()
+                # dws 接口吐消息延迟可达 15 分钟以上：游标回退 30 分钟安全余量，
+                # 避免迟到的消息因 createTime 早于游标被永久漏采；
+                # msg_id 去重保证重叠窗口不会重复处理
+                last = (datetime.now(CST) - timedelta(minutes=30)).isoformat(timespec="seconds")
                 self.db.set_state("dws_last_poll", last)
                 self.db.set_state("dingtalk_conn", "dws_polling")
             except Exception as e:

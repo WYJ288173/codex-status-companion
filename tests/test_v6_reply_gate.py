@@ -271,6 +271,10 @@ check("待确认提醒按预警时间过滤",
       'alert_time_of(r["run_text"]' in open(os.path.join(os.path.dirname(__file__), "..",
                                                           "localagent", "notify.py"),
                                              encoding="utf-8").read())
+check("轮询游标回退30分钟防 dws 延迟漏采",
+      "timedelta(minutes=30)).isoformat" in open(
+          os.path.join(os.path.dirname(__file__), "..", "localagent", "dingtalk.py"),
+          encoding="utf-8").read())
 
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",
