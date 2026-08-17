@@ -194,5 +194,10 @@ check("失败/引擎不可用卡片带重新分析按钮",
       'in ("failed", "engine_unavailable")' in src and "重新分析</button>" in src)
 check("api_state 按 running 推导 working",
       "WHERE status='running' LIMIT 1" in src and '"working" if has_running' in src)
+check("webapp 启用 CORS 供悬浮窗跨域轮询",
+      "CORSMiddleware" in src and 'allow_origins=["*"]' in src)
+check("trigSol confirm 换行已转义（防 JS 语法错误致按钮全失效）",
+      "？\\\\n将按方案" in src and "？\n将按方案" not in src)
+check("reanalyze 前端走 jfetch 容错", "jfetch('/api/reanalyze/'" in src)
 
 print(f"\n全部 {len(PASS)} 项断言通过")

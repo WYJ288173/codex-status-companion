@@ -4,6 +4,7 @@ import resource
 import threading
 
 from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 
 from .db import now
@@ -36,6 +37,9 @@ TEST_FILTER = "(r.trigger_type IS NULL OR r.trigger_type != 'simulate')"
 
 def build_app(app_ctx):
     app = FastAPI(docs_url=None, redoc_url=None)
+    # 悬浮窗/菜单栏以 pywebview:// 来源跨域轮询 /api/state，须放行 CORS 否则状态恒为 idle
+    app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                       allow_methods=["*"], allow_headers=["*"])
     db = app_ctx.db
     cfg = app_ctx.cfg
 
@@ -326,12 +330,12 @@ async function bulk(op){const ids=[...document.querySelectorAll('.sel:checked')]
 if(!ids.length){alert('请先勾选要操作的报警');return}
 if(!confirm('对 '+ids.length+' 条报警执行「'+(op==='ack'?'确认':'忽略')+'」？'))return;
 for(const id of ids){await fetch('/alerts/'+id+'/'+op,{method:'POST'})}location.reload()}
-async function reanalyze(run){const note=prompt('分析哪里不准？补充你的判断/线索，将携带该输入重新触发分析：');if(note===null)return;
-const r=await fetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:note})});
-const j=await r.json();alert(j.new_run?('已触发重新分析：'+j.new_run):('失败：'+(j.error||'')));location.reload()}
+async function reanalyze(run){const note=prompt('分析哪里不准？补充你的判断/线索，将携带该输入重新触发分析：');if(note===null)return;try{
+const j=await jfetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:note})});
+alert(j.new_run?('已触发重新分析：'+j.new_run):('失败：'+(j.error||'')));location.reload()}catch(e){alert('触发失败：'+e.message)}}
 async function trigSol(alertId,code,reqParams){let params={};
 for(const k of (reqParams||[])){const v=prompt('方案 '+code+' 需要参数 '+k+'，请输入：');if(v===null)return;params[k]=v.trim()}
-if(!confirm('手动触发解决方案 '+code+'？\n将按方案生成执行计划并进入二次确认（不会立即执行写操作）。'))return;
+if(!confirm('手动触发解决方案 '+code+'？\\n将按方案生成执行计划并进入二次确认（不会立即执行写操作）。'))return;
 const r=await fetch('/api/alerts/'+alertId+'/trigger_solution',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code,params:params})});
 const j=await r.json();if(j.error){alert('触发失败：'+j.error);return}
 alert('已生成执行计划 '+j.run_id+'（'+j.steps.length+' 步）。请到「权限设置」页二次确认后再执行。');location.reload()}
