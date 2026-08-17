@@ -443,7 +443,267 @@ P0-4：报告记录回复决策。
 
 - 每次处理必须保存 `reply_decision`、`reply_reason`、`risk_markers`。
 
-## 8. P1 建设项
+## 8. 阻塞解决方案：Reply Risk Gate
+
+针对上述 P0 阻塞，采用“独立 Reply Risk Gate 模块 + 结构化证据与风险标记 + 自动回复硬门禁”的方案解决。核心原则是：分析引擎可以给出结论，但是否能自动发群必须由本地确定性策略决定，不能由模型或群级 `auto_reply` 直接决定。
+
+### 8.1 新增模块
+
+新增模块：
+
+```text
+localagent/reply_policy.py
+```
+
+模块职责：
+
+```text
+analysis result + source_text + group config + evidence
+  -> scenario_type
+  -> risk_markers
+  -> evidence_grade
+  -> reply_decision
+  -> reply_reason
+  -> reply_markdown
+```
+
+输出三类回复决策：
+
+- `auto_reply`：允许自动发群。
+- `pending_confirm`：生成待确认草稿。
+- `no_reply`：不回复，只记录报告和审计。
+
+第一阶段不强制修改 DB schema，优先把结构化结果写入报告 JSON、`audit_logs.detail` 和 `auth_exec.payload`，降低对现有存储的侵入。后续如果查询和统计需求稳定，再补 DB 字段。
+
+### 8.2 结构化结果
+
+分析结果和回复决策需要补齐以下字段：
+
+```json
+{
+  "scenario_type": "low_risk_qa",
+  "risk_markers": ["has_trace_id"],
+  "reply_decision": "pending_confirm",
+  "reply_reason": "命中高风险标记 has_trace_id，禁止自动回复",
+  "evidence": [
+    {
+      "action": "code-search",
+      "finding": "change-flight-tp/.../XxxService.java:123",
+      "source_type": "code",
+      "source_ref": "change-flight-tp/.../XxxService.java:123",
+      "strength": "A"
+    }
+  ]
+}
+```
+
+兼容策略：
+
+- 现有 evidence 如果没有 `strength/source_ref`，按规则推导。
+- 可回溯代码路径、语雀链接、历史报告 run_id、监控恢复原文可推导为 A 档。
+- 只有 `action/finding` 且无明确来源时最多视为 B 档。
+- 无 evidence 或 evidence 为空时标记 `evidence_missing`。
+
+### 8.3 自动回复硬门禁
+
+自动回复必须同时满足：
+
+1. `dingtalk.reply_enabled=true`。
+2. 群级 `auto_reply=true` 或 `auto_reply_types` 命中。
+3. `scenario_type` 属于白名单：
+   - `low_risk_qa`
+   - `monitor_recovered`
+   - `history_duplicate`
+4. evidence 至少有 1 条 `strength=A`。
+5. 回复正文包含 A 档证据的 `source_ref`。
+6. `risk_markers` 为空。
+7. analysis result 结构完整，至少包含 `summary/conclusion/evidence`。
+
+任一条件不满足时，不允许自动发群。群级 `auto_reply=true` 只能作为外层放行条件，不能绕过 Reply Risk Gate。
+
+### 8.4 高风险标记
+
+第一阶段必须识别并拦截以下标记：
+
+- `has_order_id`
+- `has_modify_id`
+- `has_refund_id`
+- `has_trace_id`
+- `has_amount`
+- `has_audit_loss_risk`
+- `needs_write`
+- `needs_external_attribution`
+- `batch_impact`
+- `tool_failed`
+- `evidence_missing`
+- `unknown_scope`
+
+推荐识别规则：
+
+- 订单/改签单/退票单：从 10-20 位数字、上下文关键词和已有订单提取逻辑识别。
+- trace/eagleEyeId：识别 `traceId`、`eagleEyeId`、`#Err#` 后长十六进制串等。
+- 金额/资损：识别“金额、差异、资损、退款、退票费、赔付、补偿”等关键词。
+- 写操作：识别 `suggestions` 中的写类动作、`auth_exec` 执行计划、订正类关键词。
+- 外部归因：识别 conclusion 中的【外部域问题】、通知外部域建议或 `notify_external`。
+- 批量影响：复用 `correlate.py` 的 `correlation.batch/risk_level`。
+- 工具失败：从 evidence finding、`evidence_warning`、engine/tool 审计中识别。
+- 未知范围：无法分类或缺少 `scenario_type` 时标记。
+
+### 8.5 Pipeline 接入点
+
+改造位置：
+
+```text
+localagent/pipeline.py::_reply_if_allowed()
+```
+
+当前逻辑是：
+
+```python
+md = self._build_reply_markdown(result)
+if self._group_auto_reply(group, alert_type):
+    self.ding.reply(group, md)
+else:
+    pending_reply
+```
+
+目标逻辑是：
+
+```python
+decision = reply_policy.decide(
+    cfg=self.cfg,
+    group=group,
+    result=result,
+    source_text=source_text,
+)
+
+if decision.reply_decision == "auto_reply":
+    self.ding.reply(group, decision.markdown)
+elif decision.reply_decision == "pending_confirm":
+    insert pending_reply with decision payload
+else:
+    audit no_reply
+```
+
+`_group_auto_reply()` 保留，但只作为 `reply_policy.decide()` 内部的一个输入条件。
+
+### 8.6 回复模板
+
+自动回复统一使用短模板，必须带依据：
+
+```text
+【LocalAgent】结论：{summary}
+
+依据：
+1. {source_ref}
+
+仅供参考；涉及线上数据、订正、资损或责任归因请以人工确认为准。
+```
+
+如果没有可展示的 A 档 `source_ref`，即使群级允许自动回复，也只能进入 `pending_confirm`。
+
+### 8.7 配置文件
+
+新增配置：
+
+```text
+workspace/config/reply_policy.yaml
+```
+
+建议初始内容：
+
+```yaml
+auto_reply:
+  enabled: true
+  allowed_scenarios:
+    - low_risk_qa
+    - monitor_recovered
+    - history_duplicate
+  require_evidence_strength: A
+  require_evidence_in_reply: true
+  block_risk_markers:
+    - has_order_id
+    - has_modify_id
+    - has_refund_id
+    - has_trace_id
+    - has_amount
+    - has_audit_loss_risk
+    - needs_write
+    - needs_external_attribution
+    - batch_impact
+    - tool_failed
+    - evidence_missing
+    - unknown_scope
+```
+
+默认策略建议保守：
+
+- 新配置存在但初期可把 `auto_reply.enabled=false` 用于灰度。
+- 阶段 1 测试通过后，再对低风险群开启。
+- 审计、异常报警、写操作相关场景不进入白名单。
+
+### 8.8 分阶段落地
+
+阶段 1：门禁 MVP。
+
+- 新增 `reply_policy.py`。
+- 新增 `workspace/config/reply_policy.yaml`。
+- 实现 `risk_markers` 识别。
+- 实现 evidence A/B/C 推导。
+- 实现 `auto_reply/pending_confirm/no_reply` 决策。
+- 自动回复强制包含 A 档证据。
+- 报告 JSON 写入 `reply_decision/reply_reason/risk_markers`。
+
+阶段 2：接入现有 Pipeline。
+
+- 改造 `_reply_if_allowed()`。
+- 保留现有群级配置作为外层开关。
+- 让群级 `auto_reply=true` 无法绕过 Reply Risk Gate。
+- 将待确认草稿 payload 补充门禁结果和拦截原因。
+
+阶段 3：补充测试。
+
+- 覆盖无 evidence、traceId、订单号、金额、审计订正、批量影响、工具失败等拦截场景。
+- 覆盖 `low_risk_qa + A 档代码证据` 和 `monitor_recovered + 原始指标证据` 自动回复场景。
+- 覆盖 `reply_enabled=false`、群级 `auto_reply=false`、`auto_reply_types` 未命中场景。
+
+阶段 4：再建设低风险答疑 evidence 收集。
+
+- 接入 qodercli/codex 只读查询语雀和代码。
+- 输出结构化 `source_type/source_ref/strength`。
+- 逐步提高低风险答疑自动回复率。
+
+### 8.9 必须新增的测试用例
+
+阻塞解除前必须新增并通过以下测试：
+
+- `auto_reply=true + 无 evidence -> pending_confirm`
+- `auto_reply=true + traceId -> pending_confirm`
+- `auto_reply=true + 订单号 -> pending_confirm`
+- `auto_reply=true + 金额 -> pending_confirm`
+- `low_risk_qa + A档代码证据 -> auto_reply`
+- `monitor_recovered + 原始指标证据 -> auto_reply`
+- `audit_solution + 写操作建议 -> pending_confirm`
+- `batch_impact -> pending_confirm`
+- `tool_failed -> pending_confirm`
+- `reply_enabled=false -> no_reply`
+- `auto_reply_types 未命中 -> pending_confirm`
+- `自动回复正文不含 source_ref -> pending_confirm`
+
+### 8.10 阻塞解除验收标准
+
+以下全部满足后，才视为休假自治 P0 阻塞解除：
+
+1. 群级 `auto_reply=true` 不能绕过风险门禁。
+2. 无 A 档证据不会自动回复。
+3. 所有自动回复正文都包含依据。
+4. 所有高风险标记都会转 `pending_confirm` 或 `no_reply`。
+5. 报告 JSON 可看到 `reply_decision`、`reply_reason`、`risk_markers`。
+6. 待确认草稿 payload 可看到门禁结果和拦截原因。
+7. 现有 acceptance 和 v1-v5 测试全部通过。
+8. 新增 Reply Risk Gate 单元测试全部通过。
+
+## 9. P1 建设项
 
 P1-1：退改底座低风险答疑分类。
 
@@ -460,16 +720,17 @@ P1-3：真实回放集。
 - 从历史消息和报告中整理 50-100 条回放样例。
 - 标注期望 `auto_reply/pending_confirm/no_reply`。
 
-## 9. 建议下一步执行顺序
+## 10. 建议下一步执行顺序
 
-1. 实现阶段 1：Reply Risk Gate MVP。
-2. 新增 `reply_policy.yaml`，默认只开放 `low_risk_qa`、`monitor_recovered`、`history_duplicate`，但代码实现初期先全部走 `pending_confirm` 验证。
+1. 新增 `reply_policy.py` 和 `workspace/config/reply_policy.yaml`。
+2. 实现 `risk_markers`、evidence A/B/C 推导和 `auto_reply/pending_confirm/no_reply` 决策。
 3. 改造 `_reply_if_allowed()`，让群级自动回复不能绕过风险门禁。
-4. 扩展报告 JSON，写入 `reply_decision`、`reply_reason`、`risk_markers`。
-5. 增加单元测试：无 evidence 自动回复拦截、traceId 拦截、订单号拦截、金额拦截、审计订正待确认。
-6. 再推进阶段 2：低风险答疑 evidence 收集和自动回复。
+4. 扩展报告 JSON 和待确认草稿 payload，写入 `reply_decision`、`reply_reason`、`risk_markers`。
+5. 增加 Reply Risk Gate 单元测试：无 evidence 自动回复拦截、traceId 拦截、订单号拦截、金额拦截、审计订正待确认、批量影响拦截、工具失败拦截。
+6. 跑通现有 acceptance、v1-v5 和新增门禁测试。
+7. 再推进阶段 2：低风险答疑 evidence 收集和自动回复。
 
-## 10. 最终判定
+## 11. 最终判定
 
 本次 Goal 执行结论：
 
