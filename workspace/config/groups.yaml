@@ -6,7 +6,10 @@ groups:
   enabled: true
   auto_reply_types:
   - 验价
+  - 询价
   - 验座
+  - 预订
+  - 生单
 - name: 改签审计报警群
   mode: both
   process_mode: at_me_only
