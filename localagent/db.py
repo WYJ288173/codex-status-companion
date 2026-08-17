@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -44,6 +45,8 @@ class DB:
     def __init__(self, path):
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # 单连接跨线程共享（dws 轮询/pipeline/FastAPI 线程池），必须串行化防 Row 状态错乱
+        self._lock = threading.RLock()
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
         try:
@@ -79,30 +82,40 @@ class DB:
         verb = "INSERT OR IGNORE" if ignore else "INSERT"
         cols = ", ".join(kw)
         ph = ", ".join("?" for _ in kw)
-        self.conn.execute(f"{verb} INTO {table} ({cols}) VALUES ({ph})", list(kw.values()))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(f"{verb} INTO {table} ({cols}) VALUES ({ph})", list(kw.values()))
+            self.conn.commit()
 
     def update(self, table, key, key_val, **kw):
         sets = ", ".join(f"{k} = ?" for k in kw)
-        self.conn.execute(f"UPDATE {table} SET {sets} WHERE {key} = ?",
-                          list(kw.values()) + [key_val])
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(f"UPDATE {table} SET {sets} WHERE {key} = ?",
+                              list(kw.values()) + [key_val])
+            self.conn.commit()
+
+    def exec(self, sql, *args):
+        with self._lock:
+            self.conn.execute(sql, args)
+            self.conn.commit()
 
     def q(self, sql, *args):
-        return self.conn.execute(sql, args).fetchall()
+        with self._lock:
+            return self.conn.execute(sql, args).fetchall()
 
     def one(self, sql, *args):
-        return self.conn.execute(sql, args).fetchone()
+        with self._lock:
+            return self.conn.execute(sql, args).fetchone()
 
     def audit(self, category, action, target="", detail="", run_id=None):
         self.insert("audit_logs", ts=now(), category=category, action=action,
                     target=target, detail=detail, run_id=run_id)
 
     def set_state(self, key, value):
-        self.conn.execute("INSERT INTO conn_state (key, value, updated_at) VALUES (?,?,?) "
-                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                          (key, value, now()))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("INSERT INTO conn_state (key, value, updated_at) VALUES (?,?,?) "
+                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                              (key, value, now()))
+            self.conn.commit()
 
     def get_state(self, key, default=None):
         r = self.one("SELECT value FROM conn_state WHERE key=?", key)

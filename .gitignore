@@ -15,3 +15,8 @@ workspace/reports/
 __pycache__/
 *.pyc
 .venv/
+
+# 一次性排查脚本与抓包临时文件
+.parse_*.py
+.flyeye_*.json
+.tmp/

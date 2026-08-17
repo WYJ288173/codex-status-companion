@@ -4,15 +4,15 @@ groups:
   process_mode: all
   id: cidfdkcdGeG9tIxgxdLeLYyFQ==
   enabled: true
-  auto_reply: false
+  auto_reply_types:
+  - 验价
+  - 验座
 - name: 改签审计报警群
   mode: both
   process_mode: at_me_only
   id: cidSFf31OAsYq2VMu8yxLuNmA==
   enabled: true
-  auto_reply: false
 - name: 底座机器人
   mode: at_me
   id: cidVgpQHNmH4sjUrSIalDWFOg==
   enabled: false
-  auto_reply: false

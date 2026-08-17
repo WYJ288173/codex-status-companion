@@ -221,9 +221,16 @@ def html_of(path, **kw):
 
 h1 = html_of("/alerts")
 check("消息清单首屏正好 20 条", h1.count("原始全文") == 20, str(h1.count("原始全文")))
-check("默认近 2 天窗口", "钉群消息清单（2 天内共" in h1, h1[h1.find("钉群消息清单"):][:60])
-check("提供时间范围切换", "msg_days=1" in h1 and "msg_days=7" in h1)
+check("默认最近2小时窗口", "钉群消息清单（最近2小时共" in h1, h1[h1.find("钉群消息清单"):][:60])
+check("提供时间范围切换", "range=yesterday" in h1 and "range=3d" in h1)
 check("提供翻页入口", "msg_page=2" in h1)
+check("统一搜索条（时间/群/级别/关键词/匹配规则）",
+      "name='range'" in h1 and "name='f_group'" in h1 and "name='sev'" in h1
+      and "name='kw'" in h1 and "name='f_rule'" in h1)
+check("历史状态表合并为默认收起折叠区",
+      "历史状态记录" in h1 and "<details  style='margin:12px 0'>" in h1)
+check("冗余区块已移除", "待确认聚合视图" not in h1
+      and "待回复到钉群（分析结果需人工确认后发送）" not in h1)
 check("清单已降噪(无 font 标签)", "&lt;font" not in h1.split("原始全文")[0])
 check("结构化呈现来源群与告警码位", "改签监控群" in h1 and "border-radius:8px" in h1)
 h2 = html_of("/alerts", msg_page=2)
@@ -237,5 +244,43 @@ rv2 = html_of("/reports/{report_id}", report_id=rep["report_id"])
 check("报告详情页也是渲染页", "异常明细" in rv2 and "排查证据" in rv2)
 bad = html_of("/reports/view", p="../../etc/passwd")
 check("越权路径被拒", "非法路径" in bad or "报告不存在" in bad)
+
+# ---------- 待回复合并进消息清单 ----------
+from datetime import datetime, timedelta
+from localagent import storage as st
+from localagent.dingtalk import CST
+
+db.insert("runs", run_id="run-reply", task_id="t", trigger_type="dingtalk_alert",
+          source="改签监控群", status="success", started_at=now(), finished_at=now())
+db.insert("messages", ignore=True, msg_id="rp-1", group_name="改签监控群", sender="sunfire",
+          received_at=now(), matched_entry_id="read-g", matched_rule="alert",
+          run_id="run-reply", source_text="待回复关联消息")
+db.insert("auth_exec", entry_id="e-reply", run_id="run-reply", action_type="reply",
+          matched=1, exec_result="pending_reply", ts=now(),
+          payload=json.dumps({"group": "改签监控群", "summary": "摘要A",
+                              "anomalies": [{"severity": "P2", "summary": "异常A"}],
+                              "markdown": "回复草稿"}))
+db.insert("auth_exec", entry_id="e-orphan", run_id="run-orphan", action_type="reply",
+          matched=1, exec_result="pending_reply", ts=now(),
+          payload=json.dumps({"group": "改签监控群", "summary": "摘要B", "markdown": "草稿B"}))
+h3 = html_of("/alerts")
+check("待回复角标", "待回复 2 条" in h3)
+check("待回复内联进消息卡片", "待回复关联消息" in h3 and "发送回复" in h3)
+check("无消息对应的待回复兜底渲染", "摘要B" in h3 and "reply_first" in h3)
+
+# ---------- 3 天清理边界 ----------
+old_day = (datetime.now(CST) - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S")
+keep_day = (datetime.now(CST) - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+db.insert("messages", ignore=True, msg_id="old-cleanup", group_name="g", sender="s",
+          received_at=old_day, matched_entry_id="e", matched_rule="alert",
+          run_id=None, source_text="x")
+db.insert("messages", ignore=True, msg_id="keep-cleanup", group_name="g", sender="s",
+          received_at=keep_day, matched_entry_id="e", matched_rule="alert",
+          run_id=None, source_text="x")
+st.cleanup_analysis(db, 3)
+check("3 天清理边界：超期数据删除",
+      db.one("SELECT COUNT(*) c FROM messages WHERE msg_id='old-cleanup'")["c"] == 0)
+check("3 天清理边界：窗口内数据保留",
+      db.one("SELECT COUNT(*) c FROM messages WHERE msg_id='keep-cleanup'")["c"] == 1)
 
 print(f"\n全部 {len(PASS)} 项断言通过")

@@ -62,7 +62,7 @@ async def run():
     if stale:
         app.db.audit("task", "stale_runs_marked_failed", "", f"{len(stale)} runs")
     from . import storage
-    analysis_days = app.cfg.agent.get("storage", {}).get("analysis_days", 30)
+    analysis_days = app.cfg.agent.get("storage", {}).get("analysis_days", 3)
     cleaned = storage.cleanup_analysis(app.db, analysis_days)
     if cleaned:
         app.db.audit("storage", "startup_cleanup_analysis", "", f"deleted {cleaned} rows")

@@ -249,12 +249,19 @@ def build_app(app_ctx):
         return page(body)
 
     @app.get("/alerts", response_class=HTMLResponse)
-    def alerts(show_test: int = 0, hours: int = 24, sev: str = "", kw: str = "",
-               f_group: str = "", f_rule: str = "", msg_page: int = 1, msg_days: int = 2):
+    def alerts(show_test: int = 0, range: str = "2h", sev: str = "", kw: str = "",
+               f_group: str = "", f_rule: str = "", msg_page: int = 1):
         from datetime import datetime, timedelta
         from .dingtalk import CST
-        hours = min(hours, 720)
-        cutoff = (datetime.now(CST) - timedelta(hours=hours)).isoformat(timespec="seconds")
+        if range not in ("2h", "today", "yesterday", "3d"):
+            range = "2h"
+        _d0 = datetime.now(CST).replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = {"2h": datetime.now(CST) - timedelta(hours=2),
+                  "today": _d0,
+                  "yesterday": _d0 - timedelta(days=1),
+                  "3d": datetime.now(CST) - timedelta(days=3)}[range]
+        cutoff = cutoff.isoformat(timespec="seconds")
+        range_label = {"2h": "最近2小时", "today": "今天", "yesterday": "昨天起", "3d": "近3天"}[range]
 
         def sol_codes_for(a):
             from . import solutions as solmod
@@ -291,6 +298,8 @@ def build_app(app_ctx):
                 sql += " AND a.severity=?"; args.append(sev)
             if kw:
                 sql += " AND a.summary LIKE ?"; args.append(f"%{kw}%")
+            if f_group:
+                sql += " AND a.source_group LIKE ?"; args.append(f"%{f_group}%")
             rs = db.q(sql + " ORDER BY a.created_at DESC LIMIT 100", *args)
             out = ""
             for a in rs:
@@ -311,7 +320,7 @@ def build_app(app_ctx):
                         f"<td>{a['created_at'][11:19]}</td><td>{link}</td><td>{a['status']}</td><td>{btns}</td></tr>")
             return out
         body = """<script>
-function act(id,op){fetch('/alerts/'+id+'/'+op,{method:'POST'}).then(()=>location.reload())}
+function act(id,op){fetch('/alerts/'+id+'/'+op,{method:'POST'}).then(r=>{if(!r.ok)throw new Error(r.status);location.reload()}).catch(e=>alert('操作失败（服务可能正在重启），请稍后刷新重试：'+e))}
 function ignoreA(id){if(confirm('确认忽略此报警？忽略后进入 4 小时冷却，期间同类报警不再弹窗。'))act(id,'ignore')}
 async function bulk(op){const ids=[...document.querySelectorAll('.sel:checked')].map(x=>x.value);
 if(!ids.length){alert('请先勾选要操作的报警');return}
@@ -326,13 +335,16 @@ if(!confirm('手动触发解决方案 '+code+'？\n将按方案生成执行计�
 const r=await fetch('/api/alerts/'+alertId+'/trigger_solution',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code,params:params})});
 const j=await r.json();if(j.error){alert('触发失败：'+j.error);return}
 alert('已生成执行计划 '+j.run_id+'（'+j.steps.length+' 步）。请到「权限设置」页二次确认后再执行。');location.reload()}
-async function sendReply(id){if(!confirm('确认发送回复到钉群？'))return;
-const r=await fetch('/api/auth_exec/'+id+'/send_reply',{method:'POST'});const j=await r.json();alert(j.result||j.error);location.reload()}
-async function rejectReply(id){if(!confirm('确认丢弃该回复？'))return;
-const r=await fetch('/api/auth_exec/'+id+'/reject_reply',{method:'POST'});const j=await r.json();alert(j.result||j.error);location.reload()}
-async function saveReply(id){const t=document.getElementById('ed_'+id);
-const r=await fetch('/api/auth_exec/'+id+'/edit_reply',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({markdown:t.value})});const j=await r.json();alert(j.ok?'已保存修改':'失败：'+(j.error||''))}
+async function jfetch(u,opt){const r=await fetch(u,opt);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
+async function sendReply(id){if(!confirm('确认发送回复到钉群？'))return;try{
+const j=await jfetch('/api/auth_exec/'+id+'/send_reply',{method:'POST'});
+alert(j.result||('失败：'+(j.error||'未知错误')));location.reload()}catch(e){alert('发送失败：'+e.message)}}
+async function rejectReply(id){if(!confirm('确认丢弃该回复？'))return;try{
+const j=await jfetch('/api/auth_exec/'+id+'/reject_reply',{method:'POST'});
+alert(j.result||('失败：'+(j.error||'未知错误')));location.reload()}catch(e){alert('操作失败：'+e.message)}}
+async function saveReply(id){const t=document.getElementById('ed_'+id);try{
+const j=await jfetch('/api/auth_exec/'+id+'/edit_reply',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({markdown:t.value})});alert(j.ok?'已保存修改':'失败：'+(j.error||''))}catch(e){alert('保存失败：'+e.message)}}
 async function gateSol(code){const r=await fetch('/api/solutions/gate/'+code,{method:'POST',
 headers:{'Content-Type':'application/json'},body:JSON.stringify({})});const j=await r.json();
 alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));location.reload()}
@@ -370,73 +382,67 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                         "LEFT JOIN runs r ON ae.run_id=r.run_id "
                         "WHERE ae.exec_result='pending_reply' AND ae.ts >= ? ORDER BY ae.id DESC LIMIT 100",
                         cutoff)
-        pr_out = ""
-        for h in pr_rows:
-            h = dict(h)
+        pending_reply_map = {}
+
+        def reply_html(h, anchor_id=""):
             try:
                 pl = json.loads(h.get("payload") or "{}")
             except Exception:
                 pl = {}
-            grp = pl.get("group", "")
-            summary = pl.get("summary", "")
-            anomalies = pl.get("anomalies", [])
-            anom_str = "; ".join(f"[{a.get('severity')}] {a.get('summary')}" for a in anomalies) if anomalies else "-"
+            anom = pl.get("anomalies") or []
+            anom_str = "；".join(f"[{a.get('severity')}] {a.get('summary')}" for a in anom) or "-"
             link = (f"<a style='color:#7ee7b0' href='/reports/view?p={h['report_path']}'>报告</a>"
-                    if h.get("report_path") else "-")
+                    if h.get("report_path") else "")
             md = (pl.get("markdown") or "").replace("<", "&lt;")
-            pr_out += (f"<tr><td>{grp}</td><td>{summary}</td><td>{anom_str}</td>"
-                       f"<td>{h['ts']}</td><td>{link}</td>"
-                       f"<td><button onclick=\"sendReply({h['id']})\">发送回复</button> "
-                       f"<button class='red' onclick=\"rejectReply({h['id']})\">丢弃</button></td></tr>"
-                       f"<tr><td colspan=6><details><summary style='cursor:pointer;color:#9fb3c0;font-size:12px'>编辑回复内容</summary>"
-                       f"<textarea id='ed_{h['id']}' style='width:96%;height:110px;background:#0f1417;color:#e6edf3;"
-                       f"border:1px solid #22303a;border-radius:6px;font-size:12px'>{md}</textarea><br>"
-                       f"<button class='gray' onclick=\"saveReply({h['id']})\">保存修改</button></details></td></tr>")
-        body += f"<p>" + " ".join(
-            f"<a style='color:#7ee7b0' href='/alerts?hours={h}'>{label}</a>"
-            for h, label in ((24, "24小时"), (168, "7天"), (720, "30天"))) + "</p>"
+            anchor = f"id='{anchor_id}' " if anchor_id else ""
+            return (f"<div class='reply-block' {anchor}style='margin-top:8px;padding:8px;"
+                    f"border:1px dashed #f59e0b;border-radius:6px'>"
+                    f"<b style='color:#f59e0b'>待回复到钉群</b> "
+                    f"<span style='color:#e6edf3;font-size:12px;border:1px solid #22303a;"
+                    f"border-radius:4px;padding:0 4px'>{_esc(pl.get('alert_type') or 'unclassified')}</span> "
+                    f"<span style='color:#9fb3c0;font-size:12px'>{_esc(pl.get('group', ''))} · "
+                    f"{_esc(pl.get('summary', ''))} · {h['ts']}</span> {link}"
+                    f"<div style='font-size:12px;color:#e6edf3;margin:4px 0'>{_esc(anom_str)}</div>"
+                    f"<button onclick=\"sendReply({h['id']})\">发送回复</button> "
+                    f"<button class='red' onclick=\"rejectReply({h['id']})\">丢弃</button> "
+                    f"<details style='display:inline-block;margin-left:8px'><summary style='cursor:pointer;"
+                    f"color:#9fb3c0;font-size:12px;display:inline'>编辑内容</summary>"
+                    f"<textarea id='ed_{h['id']}' style='width:96%;height:110px;background:#0f1417;color:#e6edf3;"
+                    f"border:1px solid #22303a;border-radius:6px;font-size:12px'>{md}</textarea><br>"
+                    f"<button class='gray' onclick=\"saveReply({h['id']})\">保存修改</button></details></div>")
+
+        for i, h in enumerate(pr_rows):
+            h = dict(h)
+            pr_rows[i] = h
+            if h.get("run_id"):
+                pending_reply_map[h["run_id"]] = h
+        if pr_rows:
+            body += (f"<p><a href='#reply_first' style='color:#f59e0b;font-weight:bold'>"
+                     f"⚠ 待回复 {len(pr_rows)} 条 →</a></p>")
         listen_all = bool(app_ctx.cfg.dingtalk.get("listen_all", False))
-        gmode = app_ctx.cfg.dingtalk.get("process_mode", "at_me_only")
-        overrides = "、".join(f"{g['name']}={g['process_mode']}"
-                             for g in app_ctx.cfg.groups if g.get("process_mode"))
-        body += ("<div class='card'><b>监听范围</b>：　"
-                 f"<span class='{'warn' if not listen_all else 'ok'}'>"
-                 f"{'仅处理@我的消息（非@我不处理、不展示）' if not listen_all else '监听处理所有告警消息'}</span>"
-                 + "　<button class='gray' onclick=\"fetch('/api/settings/listen_all_toggle',"
-                 "{method:'POST'}).then(()=>location.reload())\">"
-                 f"{'开启全量监听' if not listen_all else '恢复仅@我'}</button>"
-                 + (f"<br><span style='color:#9fb3c0;font-size:12px'>兼容旧处理模式：默认 {gmode}"
-                    + (f"；群覆盖：{overrides}" if overrides else "") + "</span>" if overrides or gmode else "")
-                 + "</div>")
-        # 同类报警聚合（待确认按 群×级别 汇总）
-        agg = db.q("SELECT source_group, severity, COUNT(*) c FROM alerts "
-                   "WHERE status='pending' AND created_at >= ? GROUP BY source_group, severity "
-                   "ORDER BY c DESC LIMIT 20", cutoff)
-        agg_out = "".join(f"<tr><td>{r['source_group']}</td><td>{r['severity']}</td><td>{r['c']}</td></tr>"
-                          for r in agg)
-        body += ("<div class='card'><h2>待确认聚合视图（群 × 级别）</h2><table>"
-                 "<tr><th>来源群</th><th>级别</th><th>条数</th></tr>"
-                 + (agg_out or "<tr><td colspan=3>无</td></tr>") + "</table></div>")
-        # 消息清单（默认近 2 天窗口，20 条/页分页，卡片化展示）
+        body += (f"<p style='font-size:12px;color:#9fb3c0'>监听范围："
+                 f"{'监听处理所有告警消息' if listen_all else '仅处理@我的消息'}"
+                 f"（<a style='color:#7ee7b0' href='/groups'>配置</a>）</p>")
+        # 消息清单（与报警共用统一时间窗口，20 条/页分页，卡片化展示）
         from . import render as rdr
-        msg_days = max(1, min(msg_days, 30))
-        msg_cutoff = (datetime.now(CST) - timedelta(days=msg_days)).isoformat(timespec="seconds")
         msg_sql = ("SELECT m.*, r.status AS run_status, r.report_path AS report_path "
                    "FROM messages m LEFT JOIN runs r ON m.run_id=r.run_id WHERE m.received_at >= ?")
-        msg_args = [msg_cutoff]
+        msg_args = [cutoff]
         if f_group:
             msg_sql += " AND m.group_name LIKE ?"; msg_args.append(f"%{f_group}%")
         if f_rule:
             msg_sql += " AND m.matched_rule=?"; msg_args.append(f_rule)
+        if kw:
+            msg_sql += " AND m.source_text LIKE ?"; msg_args.append(f"%{kw}%")
         PAGE_SZ = 20
         total_msg = db.one("SELECT COUNT(*) c FROM (" + msg_sql + ")", *msg_args)["c"]
         msg_pages = max(1, (total_msg + PAGE_SZ - 1) // PAGE_SZ)
         msg_page = max(1, min(msg_page, msg_pages))
         msg_rows = db.q(msg_sql + " ORDER BY m.received_at DESC LIMIT ? OFFSET ?",
                         *msg_args, PAGE_SZ, (msg_page - 1) * PAGE_SZ)
-        groups = [r["g"] for r in db.q("SELECT DISTINCT group_name g FROM messages WHERE received_at >= ?", msg_cutoff)]
+        groups = [r["g"] for r in db.q("SELECT DISTINCT group_name g FROM messages WHERE received_at >= ?", cutoff)]
         rules = [r["v"] for r in db.q(
-            "SELECT DISTINCT matched_rule v FROM messages WHERE received_at >= ? AND matched_rule IS NOT NULL", msg_cutoff)]
+            "SELECT DISTINCT matched_rule v FROM messages WHERE received_at >= ? AND matched_rule IS NOT NULL", cutoff)]
         from . import solutions as solmod
         sols_by_code = {s.get("code"): s for s in app_ctx.cfg.solutions}
         _esc = rdr.esc
@@ -476,6 +482,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
         _rule_style = {"cooldown": "跳过(冷却)", "unrecognized": "未识别", "no_match": "未匹配",
                        "broadcast_record_only": "记录不分析(仅@我)"}
         msg_out = ""
+        reply_anchor = {"done": False}
         for m in msg_rows:
             m = dict(m)
             parsed = None
@@ -500,6 +507,11 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
             body_html = _broadcast_card(parsed) if parsed else (
                 f"<div style='margin-top:6px;font-size:13px;color:#e6edf3;white-space:pre-wrap'>"
                 f"{_esc(clean[:180])}{'…' if len(clean) > 180 else ''}</div>")
+            reply_block = ""
+            if m.get("run_id") and m["run_id"] in pending_reply_map:
+                anchor = "reply_first" if not reply_anchor["done"] else ""
+                reply_anchor["done"] = True
+                reply_block = reply_html(pending_reply_map[m["run_id"]], anchor)
             msg_out += (
                 "<div style='border:1px solid #22303a;border-radius:8px;padding:10px;margin-bottom:8px;"
                 "background:#0f1417'>"
@@ -509,46 +521,50 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                 f"{_esc(m.get('group_name'))}</span>"
                 f"<span style='color:#9fb3c0'>{_esc(m.get('sender'))}</span>{chips}"
                 f"<span style='margin-left:auto'>{st_tag}</span></div>"
-                f"{body_html}"
+                f"{body_html}{reply_block}"
                 f"<details style='margin-top:6px'><summary style='cursor:pointer;color:#9fb3c0;"
                 f"font-size:11px'>原始全文</summary><pre style='font-size:11px'>"
                 f"{_esc(m.get('source_text'))}</pre></details></div>")
         g_opts = "".join(f"<option value='{_esc(g)}'{' selected' if g == f_group else ''}>{_esc(g)}</option>" for g in groups)
         r_opts = "".join(f"<option value='{_esc(v)}'{' selected' if v == f_rule else ''}>{_esc(v)}</option>"
                          for v in rules)
-        msg_qs = f"hours={hours}&f_group={f_group}&f_rule={f_rule}&msg_days={msg_days}"
+        base_qs = (f"f_group={f_group}&f_rule={f_rule}&sev={sev}&kw={kw}&show_test={show_test}")
         range_links = " ".join(
-            f"<a style='color:{'#00c16a' if d == msg_days else '#7ee7b0'}' "
-            f"href='/alerts?hours={hours}&f_group={f_group}&f_rule={f_rule}&msg_days={d}'>{label}</a>"
-            for d, label in ((1, "近1天"), (2, "近2天"), (7, "近7天")))
+            f"<a style='color:{'#00c16a' if v == range else '#7ee7b0'}' "
+            f"href='/alerts?range={v}&{base_qs}'>{label}</a>"
+            for v, label in (("2h", "近2小时"), ("today", "今天"), ("yesterday", "昨天"), ("3d", "近3天")))
         nav = []
+        msg_qs = f"range={range}&{base_qs}"
         if msg_page > 1:
             nav.append(f"<a style='color:#7ee7b0' href='/alerts?{msg_qs}&msg_page={msg_page-1}'>上一页</a>")
         nav.append(f"<span style='color:#9fb3c0'>第 {msg_page}/{msg_pages} 页</span>")
         if msg_page < msg_pages:
             nav.append(f"<a style='color:#7ee7b0' href='/alerts?{msg_qs}&msg_page={msg_page+1}'>下一页</a>")
-        body += ("<div class='card'><h2>钉群消息清单"
-                 f"（{msg_days} 天内共 {total_msg} 条，每页 {PAGE_SZ} 条，每条消息单独分析）</h2>"
-                 f"<p style='font-size:12px'>{range_links}</p>"
-                 f"<form method='get'><input type='hidden' name='hours' value='{hours}'>"
-                 f"<input type='hidden' name='msg_days' value='{msg_days}'>"
+        # 兜底：窗口内无对应消息的 pending_reply（如手动触发）单独渲染
+        win_run_ids = {r["run_id"] for r in db.q(
+            "SELECT run_id FROM messages WHERE received_at >= ? AND run_id IS NOT NULL", cutoff)}
+        orphan_html = ""
+        for h in pr_rows:
+            if (h.get("run_id") or "") not in win_run_ids:
+                anchor = "reply_first" if not reply_anchor["done"] else ""
+                reply_anchor["done"] = True
+                orphan_html += reply_html(h, anchor)
+        body += ("<div class='card'><h2>搜索</h2>"
+                 f"<form method='get' style='display:flex;gap:8px;flex-wrap:wrap;align-items:center'>"
+                 f"时间 <select name='range'>"
+                 + "".join(f"<option value='{v}'{' selected' if v == range else ''}>{label}</option>"
+                           for v, label in (("2h", "近2小时"), ("today", "今天"), ("yesterday", "昨天起"), ("3d", "近3天")))
+                 + f"</select> "
                  f"群 <select name='f_group'><option value=''>全部</option>{g_opts}</select> "
-                 f"匹配 <select name='f_rule'><option value=''>全部</option>{r_opts}</select> "
-                 f"<button class='gray'>筛选</button></form>"
-                 + (msg_out or "<p style='color:#9fb3c0'>无消息</p>")
-                 + "<p style='font-size:12px'>" + "　".join(nav) + "</p></div>")
-        body += ("<div class='card'><h2>待回复到钉群（分析结果需人工确认后发送）</h2>"
-                 "<table><tr><th>群</th><th>摘要</th><th>异常</th><th>时间</th><th>报告</th><th>操作</th></tr>"
-                 + (pr_out or "<tr><td colspan=6>无</td></tr>") + "</table></div>")
-        th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
-        body += (f"<p><label><input type='checkbox' onchange=\"location='/alerts?hours={hours}&sev={sev}&kw={kw}&show_test='+(this.checked?1:0)\" "
-                 f"{'checked' if show_test else ''}> 显示测试注入数据</label> "
-                 f"<form method='get' style='display:inline'> <input type='hidden' name='hours' value='{hours}'>"
                  f"级别 <select name='sev'><option value=''>全部</option>"
                  + "".join(f"<option value='{s}'{' selected' if s == sev else ''}>{s}</option>"
-                           for s in ("P1", "P2", "P3", "OK")) + f"</select> "
-                 f"<input name='kw' value='{kw}' placeholder='关键词'> "
-                 f"<button class='gray'>筛选</button></form></p>")
+                           for s in ("P1", "P2", "P3", "OK"))
+                 + f"</select> "
+                 f"匹配 <select name='f_rule'><option value=''>全部</option>{r_opts}</select> "
+                 f"<input name='kw' value='{_esc(kw)}' placeholder='关键词'> "
+                 f"<label style='font-size:12px'><input type='checkbox' name='show_test' value='1' "
+                 f"{'checked' if show_test else ''}> 测试数据</label> "
+                 f"<button class='gray'>筛选</button></form></div>")
         pend = rows("pending")
         body += ("<div class='card'><h2>待确认（有问题，强提醒）</h2>"
                  "<p><button onclick=\"bulk('ack')\">批量确认</button> "
@@ -556,10 +572,22 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                  "<label style='font-size:12px;color:#9fb3c0'><input type='checkbox' onclick=\"document.querySelectorAll('.sel').forEach(c=>c.checked=this.checked)\"> 全选</label></p>"
                  "<table><tr><th></th><th>级别</th><th>摘要</th><th>来源</th><th>时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
                  + (pend or "<tr><td colspan=8>无</td></tr>") + "</table></div>")
+        body += ("<div class='card'><h2>钉群消息清单"
+                 f"（{range_label}共 {total_msg} 条，每页 {PAGE_SZ} 条）</h2>"
+                 f"<p style='font-size:12px'>{range_links}</p>"
+                 + (msg_out or "<p style='color:#9fb3c0'>无消息</p>")
+                 + (orphan_html or "")
+                 + "<p style='font-size:12px'>" + "　".join(nav) + "</p></div>")
+        th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
+        has_filter = bool(sev or kw or f_group or f_rule)
+        hist = ""
         for title, st in (("无问题标注", "no_problem"), ("已确认", "acked"),
                           ("已忽略", "ignored"), ("已重新分析", "reanalyzed")):
             r_out = rows(st)
-            body += f"<div class='card'><h2>{title}</h2><table>{th}" + (r_out or "<tr><td colspan=7>无</td></tr>") + "</table></div>"
+            hist += f"<h3>{title}</h3><table>{th}" + (r_out or "<tr><td colspan=7>无</td></tr>") + "</table>"
+        body += (f"<details {'open' if has_filter else ''} style='margin:12px 0'>"
+                 f"<summary style='cursor:pointer;color:#9fb3c0'>历史状态记录"
+                 f"（无问题标注 / 已确认 / 已忽略 / 已重新分析）</summary>{hist}</details>")
         return page(body, len(app_ctx.notifier.pending()) or "")
 
     @app.get("/reports/by-path")
@@ -930,7 +958,10 @@ window.addEventListener('load',watchExecuting)
                         else:
                             lines.append(f"审计告警处理失败：改签单{mid} 订正未成功，请人工介入")
                     md = "**LocalAgent 方案执行结论**\n\n" + "\n".join(lines)
-            app_ctx.ding.reply(payload.get("group", ""), md)
+            if not app_ctx.ding.reply(payload.get("group", ""), md):
+                db.audit("dingtalk", "plan_reply_send_failed", payload.get("group", ""),
+                         "dws 未投递成功", row["run_id"])
+                return {"error": "回复发送失败：消息未投递到钉群，请重试"}
             db.update("auth_exec", "id", exec_id, exec_result="replied", reject_reason="")
             db.audit("dingtalk", "plan_reply_sent", payload.get("group", ""),
                      f"plan step {payload.get('step_no')}", row["run_id"])
@@ -975,10 +1006,17 @@ window.addEventListener('load',watchExecuting)
 
     @app.post("/api/auth_exec/{exec_id}/send_reply")
     def auth_exec_send_reply(exec_id: int):
-        run_id = app_ctx.pipeline.send_reply(exec_id)
-        if run_id is None:
+        try:
+            out = app_ctx.pipeline.send_reply(exec_id)
+        except Exception as e:
+            db.audit("ui", "send_reply_error", str(exec_id), repr(e)[:200])
+            return {"error": f"发送异常：{e}"[:200]}
+        if out is None:
             return {"error": "记录不存在或已处理"}
-        return {"result": "已发送回复到钉群"}
+        _run_id, ok = out
+        if ok:
+            return {"result": "已发送回复到钉群"}
+        return {"error": "发送失败：消息未投递到钉群（已保留待回复，可重试），详见审计日志"}
 
     @app.post("/api/auth_exec/{exec_id}/reject_reply")
     def auth_exec_reject_reply(exec_id: int):
@@ -1001,9 +1039,8 @@ window.addEventListener('load',watchExecuting)
         except Exception:
             pl = {}
         pl["markdown"] = md
-        db.conn.execute("UPDATE auth_exec SET payload=? WHERE id=?",
-                        (json.dumps(pl, ensure_ascii=False), exec_id))
-        db.conn.commit()
+        db.exec("UPDATE auth_exec SET payload=? WHERE id=?",
+                json.dumps(pl, ensure_ascii=False), exec_id)
         db.audit("dingtalk", "reply_edited", pl.get("group", ""), "", row["run_id"])
         return {"ok": True}
 
@@ -1072,26 +1109,56 @@ window.addEventListener('load',watchExecuting)
     @app.get("/groups", response_class=HTMLResponse)
     def groups_page():
         from . import configsync
+        from .correlate import FAMILIES
         gs = configsync.load_groups(app_ctx.cfg.workspace)
         rows = ""
         for i, g in enumerate(gs):
+            types = g.get("auto_reply_types") or []
+            boxes = "".join(
+                f"<label style='margin-right:6px;font-size:12px'>"
+                f"<input type='checkbox' value='{f}'{' checked' if f in types else ''}>{f}</label>"
+                for f in FAMILIES)
+            types_cell = (f"<span id='types_lbl_{i}' style='font-size:12px;color:"
+                          f"{'#7ee7b0' if types else '#9fb3c0'}'>"
+                          f"{'、'.join(types) if types else '未放开（全部转人工确认）'}</span> "
+                          f"<button class='gray' onclick=\"gtoggleEdit({i})\">设置</button>"
+                          f"<div id='types_{i}' style='display:none;margin-top:6px'>"
+                          f"{boxes}<br><button class='gray' onclick=\"gsaveTypes({i})\">保存</button></div>")
             rows += (f"<tr><td>{g.get('name')}</td><td>{g.get('mode')}</td>"
                      f"<td>{g.get('id') or '-'}</td><td>{'启用' if g.get('enabled', True) else '停用'}</td>"
-                     f"<td>{'开' if g.get('auto_reply', False) else '关'} "
-                     f"<button class='gray' onclick=\"gact('auto_reply',{i})\">切换</button></td>"
+                     f"<td style='font-size:12px'>{types_cell}</td>"
                      f"<td><button class='gray' onclick=\"gact('toggle',{i})\">启停</button> "
                      f"<button class='gray' onclick=\"gact('resolve',{i})\">解析ID</button> "
                      f"<button class='gray' onclick=\"gact('remove',{i})\">移除</button></td></tr>")
+        fam_txt = "、".join(FAMILIES)
         body = f"""<script>
-async function gact(op,i){{const r=await fetch('/api/groups/'+op+'/'+i,{{method:'POST'}});const j=await r.json();if(j.error)alert(j.error);location.reload()}}
+async function gact(op,i){{try{{const r=await fetch('/api/groups/'+op+'/'+i,{{method:'POST'}});
+if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();if(j.error)alert(j.error);location.reload()}}catch(e){{alert('操作失败：'+e.message)}}}}
 async function gadd(){{const name=prompt('钉群名称');if(!name)return;const mode=prompt('模式 alert=报警匹配 / at_me=@我专项 / both','alert');if(!mode)return;
-const r=await fetch('/api/groups/add',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{name:name,mode:mode}})}});
-const j=await r.json();if(j.error)alert(j.error);location.reload()}}
+try{{const r=await fetch('/api/groups/add',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{name:name,mode:mode}})}});
+if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();if(j.error)throw new Error(j.error);location.reload()}}catch(e){{alert('添加失败：'+e.message)}}}}
+function gtoggleEdit(i){{const d=document.getElementById('types_'+i);d.style.display=(d.style.display==='none')?'':'none'}}
+async function gsaveTypes(i){{const v=[...document.querySelectorAll('#types_'+i+' input:checked')].map(x=>x.value).join(',');
+try{{const r=await fetch('/api/groups/auto_reply_types/'+i,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{types:v}})}});
+if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();if(j.error)throw new Error(j.error);location.reload()}}catch(e){{alert('保存失败：'+e.message)}}}}
 </script>
 <div class="card"><h2>钉钉群配置（授权范围）</h2>
-<table><tr><th>群名</th><th>模式</th><th>会话ID</th><th>状态</th><th>自动回复</th><th>操作</th></tr>{rows}</table>
+<table><tr><th>群名</th><th>模式</th><th>会话ID</th><th>状态</th><th>自动回复报警类型</th><th>操作</th></tr>{rows}</table>
 <p><button onclick="gadd()">添加钉群</button>
-<span style="color:#9fb3c0;font-size:12px">保存即热加载生效；LocalAgent 仅处理启用群的消息，其他群消息不落地</span></p></div>"""
+<span style="color:#9fb3c0;font-size:12px">保存即热加载生效；LocalAgent 仅处理启用群的消息。自动回复精确到「群×报警类型」：仅勾选的类型自动回复，未勾选与未分类报警一律转人工确认卡片。合法类型：{fam_txt}</span></p></div>"""
+        listen_all = bool(app_ctx.cfg.dingtalk.get("listen_all", False))
+        gmode = app_ctx.cfg.dingtalk.get("process_mode", "at_me_only")
+        overrides = "、".join(f"{g['name']}={g['process_mode']}"
+                             for g in app_ctx.cfg.groups if g.get("process_mode"))
+        body += ("<div class='card'><h2>监听范围</h2>"
+                 f"<span class='{'warn' if not listen_all else 'ok'}'>"
+                 f"{'仅处理@我的消息（非@我不处理、不展示）' if not listen_all else '监听处理所有告警消息'}</span>"
+                 + "　<button class='gray' onclick=\"fetch('/api/settings/listen_all_toggle',"
+                 "{method:'POST'}).then(()=>location.reload())\">"
+                 f"{'开启全量监听' if not listen_all else '恢复仅@我'}</button>"
+                 + (f"<br><span style='color:#9fb3c0;font-size:12px'>兼容旧处理模式：默认 {gmode}"
+                    + (f"；群覆盖：{overrides}" if overrides else "") + "</span>" if overrides or gmode else "")
+                 + "</div>")
         return page(body)
 
     @app.post("/api/groups/add")
@@ -1111,6 +1178,27 @@ const j=await r.json();if(j.error)alert(j.error);location.reload()}}
         _reload()
         return {"ok": True}
 
+    @app.post("/api/groups/auto_reply_types/{idx}")
+    async def groups_auto_reply_types(idx: int, request: Request):
+        from . import configsync
+        from .correlate import FAMILIES
+        data = await request.json()
+        raw = (data.get("types") or "").strip()
+        types = [t.strip() for t in raw.replace("，", ",").split(",") if t.strip()]
+        bad = [t for t in types if t not in FAMILIES]
+        if bad:
+            return {"error": f"非法类型：{'、'.join(bad)}；合法值：{'、'.join(FAMILIES)}"}
+        ws = app_ctx.cfg.workspace
+        gs = configsync.load_groups(ws)
+        if idx < 0 or idx >= len(gs):
+            return {"error": "索引越界"}
+        gs[idx]["auto_reply_types"] = types
+        configsync.save_groups(ws, gs)
+        _reload()
+        db.audit("config", "auto_reply_types_updated", gs[idx].get("name", ""),
+                 ",".join(types) or "(清空)")
+        return {"ok": True}
+
     @app.post("/api/groups/{op}/{idx}")
     def groups_op(op: str, idx: int):
         import json as _json
@@ -1123,8 +1211,6 @@ const j=await r.json();if(j.error)alert(j.error);location.reload()}}
         g = gs[idx]
         if op == "toggle":
             g["enabled"] = not g.get("enabled", True)
-        elif op == "auto_reply":
-            g["auto_reply"] = not g.get("auto_reply", False)
         elif op == "remove":
             gs.pop(idx)
         elif op == "resolve":
@@ -1395,7 +1481,7 @@ const r=await fetch('/api/storage/'+op,{{method:'POST'}});const j=await r.json()
 <button onclick="sact('archive')">归档 6-12 个月数据</button>
 <button onclick="sact('purge_year')">清空 1 年以上数据</button>
 <button onclick="sact('enforce_quota')">超容量清理</button></p>
-<p style="color:#9fb3c0;font-size:12px">保留策略：报告 90 天 / 证据 30 天 / 审计 180 天 / 分析记录 30 天；6-12 个月压缩归档；&gt;1 年清空。可在 agent.yaml storage 段调整。</p></div>"""
+<p style="color:#9fb3c0;font-size:12px">保留策略：报告 90 天 / 证据 30 天 / 审计 180 天 / 分析记录与报警消息 3 天；6-12 个月压缩归档；&gt;1 年清空。可在 agent.yaml storage 段调整。</p></div>"""
         return page(body)
 
     @app.post("/api/storage/{op}")
@@ -1405,7 +1491,7 @@ const r=await fetch('/api/storage/'+op,{{method:'POST'}});const j=await r.json()
         if op == "cleanup_expired":
             return st.cleanup_expired(db, ws, app_ctx.cfg)
         if op == "cleanup_analysis":
-            days = int(app_ctx.cfg.agent.get("storage", {}).get("analysis_days", 30))
+            days = int(app_ctx.cfg.agent.get("storage", {}).get("analysis_days", 3))
             return {"deleted": st.cleanup_analysis(db, days)}
         if op == "archive":
             return {"archived": len(st.archive_old(db, ws))}

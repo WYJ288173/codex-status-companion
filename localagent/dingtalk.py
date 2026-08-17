@@ -35,6 +35,7 @@ class MockDingTalk:
     def reply(self, group, markdown):
         self.db.audit("dingtalk", "reply_sent", group, markdown[:300])
         self.db.set_state("last_reply", f"{group}: {markdown[:120]}")
+        return True
 
 
 class DwsDingTalk:
@@ -117,33 +118,45 @@ class DwsDingTalk:
         return g.get("id") if g else None
 
     def reply(self, group, markdown):
+        """同步发送，返回是否投递成功；失败/超时必留 reply_failed 审计。"""
         text = markdown[:4000]
+        ok = False
         if self.send_channel == "dws":
             gid = self._group_id(group)
             if not gid:
                 self.db.audit("dingtalk", "reply_skipped", group, "no conversationId configured")
-                return
+                self.db.set_state("last_reply", f"{group}: {text[:120]}")
+                return False
             import subprocess
-            r = subprocess.run(["dws", "chat", "message", "send", "--group", gid,
-                                "--title", "LocalAgent", "--text", text, "-y"],
-                               capture_output=True, timeout=60)
-            if r.returncode != 0:
-                r = subprocess.run(["dws", "chat", "message", "send", "--group", gid,
-                                    "--title", "LocalAgent", "--text", text, "-y"],
-                                   capture_output=True, timeout=60)
-            ok = r.returncode == 0
-            self.db.audit("dingtalk", "reply_sent" if ok else "reply_failed",
-                          group, (r.stdout or r.stderr).decode()[:200])
+            err = ""
+            for attempt in (1, 2):
+                try:
+                    r = subprocess.run(["dws", "chat", "message", "send", "--group", gid,
+                                        "--title", "LocalAgent", "--text", text, "-y"],
+                                       capture_output=True, timeout=30)
+                    if r.returncode == 0:
+                        ok = True
+                        err = (r.stdout or b"").decode()[:200]
+                        break
+                    err = f"rc={r.returncode}: " + (r.stderr or r.stdout or b"").decode()[:160]
+                except subprocess.TimeoutExpired:
+                    err = "dws send 超时(30s)"
+                    break
+                except Exception as e:
+                    err = f"dws send 异常: {e}"[:200]
+                    break
+            self.db.audit("dingtalk", "reply_sent" if ok else "reply_failed", group, err)
         else:
-            self._reply_webhook(group, text)
+            ok = self._reply_webhook(group, text)
         self.db.set_state("last_reply", f"{group}: {text[:120]}")
+        return ok
 
     def _reply_webhook(self, group, text):
         url = self.cfg.dingtalk.get("webhook_url", "")
         secret = self.cfg.dingtalk.get("webhook_secret", "")
         if not url:
             self.db.audit("dingtalk", "reply_skipped", group, "no webhook_url configured")
-            return
+            return False
         if secret:
             ts = str(round(time.time() * 1000))
             sign = urllib.parse.quote_plus(base64.b64encode(hmac.new(
@@ -157,10 +170,11 @@ class DwsDingTalk:
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     self.db.audit("dingtalk", "reply_sent", group, resp.read().decode()[:200])
-                return
+                return True
             except Exception as e:
                 if attempt == 2:
                     self.db.audit("dingtalk", "reply_failed", group, str(e)[:200])
+        return False
 
 
 def build(cfg, db, on_message=None):

@@ -45,6 +45,17 @@ class Pipeline:
             trigger, source = "dingtalk_alert", "monitor_alert"
             if audit_parsed:
                 source = "audit_broadcast"
+                # 审计播报仅当规则 owner/@人是本人才分析，他人 owner 的播报不采集
+                owner_name = self.cfg.dingtalk.get("owner_name", "华扬")
+                if owner_name not in msg["text"]:
+                    db.insert("messages", ignore=True, msg_id=msg["msg_id"],
+                              group_name=msg["group"], sender=msg["sender"],
+                              received_at=now(), matched_entry_id=entry["id"],
+                              matched_rule="broadcast_not_my_owner", run_id=None,
+                              source_text=msg["text"])
+                    db.audit("dingtalk", "broadcast_skipped_other_owner", msg["group"],
+                             "", None)
+                    return {"handled": False, "reason": "broadcast_owner_not_me"}
             cd_key = f"{msg['group']}:{(parsed or {}).get('app') or ''}"
             if self.cooldowns.hit(cd_key):
                 db.insert("messages", ignore=True, msg_id=msg["msg_id"],
@@ -163,7 +174,7 @@ class Pipeline:
             db.update("runs", "run_id", run_id, status="success", finished_at=now(),
                       engine=eng, engine_version=ver)
             self.notifier.raise_alerts(run_id, msg["group"], result.get("anomalies", []))
-            self._reply_if_allowed(msg["group"], result, run_id)
+            self._reply_if_allowed(msg["group"], result, run_id, msg.get("text") or "")
         return {"handled": True, "run_id": run_id, "normal": result.get("normal")}
 
     def _reanalyze_prepare(self, orig_run_id, note):
@@ -253,7 +264,7 @@ class Pipeline:
                 src_type = "audit_group_at_me"
             self._handle_suggestions(run_id, result, src_type, matched_sols, grp)
             self.notifier.raise_alerts(run_id, run0["source"], result.get("anomalies", []))
-            self._reply_if_allowed(run0["source"], result, run_id)
+            self._reply_if_allowed(run0["source"], result, run_id, run0["source_text"] or "")
         db.audit("task", "reanalyze", orig_run_id, note[:200], run_id)
 
     async def reanalyze(self, orig_run_id, note):
@@ -329,13 +340,18 @@ class Pipeline:
             md += f"\n- [{a.get('severity')}] {a.get('summary')}"
         return md
 
-    def _group_auto_reply(self, group_name):
+    def _group_auto_reply(self, group_name, alert_type=None):
+        """仅白名单类型放行自动回复；unclassified 与未配置类型一律转人工。"""
         for g in self.cfg.groups:
             if g.get("name") == group_name:
-                return g.get("auto_reply", False)
+                types = g.get("auto_reply_types") or []
+                return bool(alert_type) and alert_type in types
         return False
 
-    def _reply_if_allowed(self, group, result, run_id):
+    def _reply_if_allowed(self, group, result, run_id, source_text=""):
+        from . import correlate as corrmod
+        key = corrmod.family_key(source_text)
+        alert_type = key.split(":", 1)[1] if key and key.startswith("kw:") else None
         if not self.cfg.dingtalk.get("reply_enabled", True):
             self.db.audit("dingtalk", "reply_skipped", group, "reply_enabled=false")
             return
@@ -347,24 +363,31 @@ class Pipeline:
                            exec_result="skipped", ts=now())
             return
         md = self._build_reply_markdown(result)
-        if self._group_auto_reply(group):
-            self.ding.reply(group, md)
-            self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
-                           action_type="message_write", matched=1, reject_reason="",
-                           exec_result="replied", ts=now())
-        else:
-            self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
-                           action_type="message_write", matched=1,
-                           reject_reason="awaiting manual send",
-                           exec_result="pending_reply", ts=now(),
-                           payload=json.dumps({"group": group, "markdown": md,
-                                               "run_id": run_id,
-                                               "summary": result.get("summary", ""),
-                                               "anomalies": result.get("anomalies", [])},
-                                              ensure_ascii=False))
-            self.db.audit("dingtalk", "reply_pending", group, "", run_id)
+        type_tag = alert_type or "unclassified"
+        if self._group_auto_reply(group, alert_type):
+            if self.ding.reply(group, md):
+                self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
+                               action_type="message_write", matched=1, reject_reason="",
+                               exec_result="replied", ts=now())
+                self.db.audit("dingtalk", "reply_auto", group, f"alert_type={type_tag}", run_id)
+                return
+            self.db.audit("dingtalk", "reply_auto_failed", group,
+                          f"alert_type={type_tag}，自动发送失败转人工", run_id)
+        self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
+                       action_type="message_write", matched=1,
+                       reject_reason=f"awaiting manual send (alert_type={type_tag})",
+                       exec_result="pending_reply", ts=now(),
+                       payload=json.dumps({"group": group, "markdown": md,
+                                           "run_id": run_id,
+                                           "alert_type": type_tag,
+                                           "summary": result.get("summary", ""),
+                                           "anomalies": result.get("anomalies", [])},
+                                          ensure_ascii=False))
+        self.db.audit("dingtalk", "reply_pending", group,
+                      f"alert_type={type_tag}", run_id)
 
     def send_reply(self, exec_id):
+        """手动发送待回复；返回 (run_id, ok)。发送失败保持 pending_reply 可重试。"""
         row = self.db.one("SELECT * FROM auth_exec WHERE id=? AND exec_result='pending_reply'",
                           exec_id)
         if not row:
@@ -372,11 +395,16 @@ class Pipeline:
         payload = json.loads(row["payload"])
         group = payload["group"]
         md = payload["markdown"]
-        self.ding.reply(group, md)
-        self.db.update("auth_exec", "id", exec_id,
-                       exec_result="replied", reject_reason="")
-        self.db.audit("dingtalk", "reply_sent_manual", group, "", row["run_id"])
-        return row["run_id"]
+        ok = bool(self.ding.reply(group, md))
+        if ok:
+            self.db.update("auth_exec", "id", exec_id,
+                           exec_result="replied", reject_reason="")
+            self.db.audit("dingtalk", "reply_sent_manual", group, "", row["run_id"])
+        else:
+            self.db.update("auth_exec", "id", exec_id, exec_result="pending_reply",
+                           reject_reason="发送失败：消息未投递到钉群，可重试（详见 reply_failed 审计）")
+            self.db.audit("dingtalk", "send_manual_failed", group, "", row["run_id"])
+        return row["run_id"], ok
 
     def reject_reply(self, exec_id):
         row = self.db.one("SELECT * FROM auth_exec WHERE id=? AND exec_result='pending_reply'",

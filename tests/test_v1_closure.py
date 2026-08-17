@@ -68,7 +68,11 @@ for rid, aid in (("run-real", "al-real"), ("run-sim", "al-sim")):
 
 
 class NoUI:
-    pass
+    def toast(self, text):
+        pass
+
+    def modal(self, alerts):
+        pass
 
 
 class FakeCfg:
@@ -130,12 +134,13 @@ e = next(x for x in Cfg.auth_entries if x["id"] == payload["entry_id"])
 ok, detail = authlist.execute_write(e, payload["suggestion"]["params"])
 check("确认执行闭环", ok and "never 2" in detail, detail)
 
-# 8. 回复逻辑：auto_reply=false → pending_reply
+# 8. 回复逻辑：无白名单 → pending_reply
 class ReplyDing:
     def __init__(self):
         self.calls = []
     def reply(self, g, t):
         self.calls.append((g, t))
+        return True
 
 reply_entry = {"id": "dt-reply", "app": "dingtalk", "scope": "write",
                "feature": "回复分析结论到值班群",
@@ -155,27 +160,63 @@ rp = Pipeline(ReplyCfg(), db, n, rd)
 result2 = {"summary": "测试异常", "anomalies": [{"severity": "P2", "summary": "金额不符"}]}
 rp._reply_if_allowed("test-group", result2, "run-reply1")
 pr = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply1' AND exec_result='pending_reply'")
-check("auto_reply=false → pending_reply", pr is not None, str(pr))
-check("auto_reply=false 不调 ding.reply", len(rd.calls) == 0, str(rd.calls))
+check("无白名单 → pending_reply", pr is not None, str(pr))
+check("无白名单 不调 ding.reply", len(rd.calls) == 0, str(rd.calls))
 
-# 9. auto_reply=true → 立即回复
+# 9. 遗留 auto_reply=true 无类型白名单 → 不再直通（仅白名单类型可自动回复）
 ReplyCfg.groups = [{"name": "test-group", "auto_reply": True}]
 rd2 = ReplyDing()
 rp2 = Pipeline(ReplyCfg(), db, n, rd2)
 rp2._reply_if_allowed("test-group", result2, "run-reply2")
-check("auto_reply=true → ding.reply 被调用", len(rd2.calls) == 1, str(rd2.calls))
-rr = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply2' AND exec_result='replied'")
-check("auto_reply=true → exec_result=replied", rr is not None, str(rr))
+check("auto_reply=true 无白名单 → 不自动回复", len(rd2.calls) == 0, str(rd2.calls))
+pr2 = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply2' AND exec_result='pending_reply'")
+check("auto_reply=true 无白名单 → pending_reply", pr2 is not None, str(pr2))
 
-# 10. send_reply: 手动发送 pending_reply
+# 9b. 群×报警类型维度自动回复
+ReplyCfg.groups = [{"name": "test-group", "auto_reply": False, "auto_reply_types": ["验价"]}]
+rd4 = ReplyDing()
+rp4 = Pipeline(ReplyCfg(), db, n, rd4)
+rp4._reply_if_allowed("test-group", result2, "run-reply4", source_text="改签验价失败率下跌报警")
+check("命中放开类型 → 自动回复", len(rd4.calls) == 1, str(rd4.calls))
+rp4._reply_if_allowed("test-group", result2, "run-reply5", source_text="预订流程异常报警")
+check("未命中类型 → 不自动回复", len(rd4.calls) == 1, str(rd4.calls))
+pr5 = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply5' AND exec_result='pending_reply'")
+check("未命中类型 → pending_reply", pr5 is not None, str(pr5))
+rp4._reply_if_allowed("test-group", result2, "run-reply6", source_text="无家族关键词的报警")
+check("未分类报警 → 不自动回复转人工",
+      len(rd4.calls) == 1
+      and db.one("SELECT * FROM auth_exec WHERE run_id='run-reply6' AND exec_result='pending_reply'") is not None)
+ReplyCfg.groups = [{"name": "test-group", "auto_reply": True}]
+
+# 10. send_reply: 手动发送 pending_reply（成功路径）
 rd3 = ReplyDing()
 rp3 = Pipeline(ReplyCfg(), db, n, rd3)
 pending = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply1' AND exec_result='pending_reply'")
-run_id_sent = rp3.send_reply(pending["id"])
-check("send_reply 返回 run_id", run_id_sent == "run-reply1", str(run_id_sent))
+run_id_sent, ok_sent = rp3.send_reply(pending["id"])
+check("send_reply 成功返回 (run_id, True)", (run_id_sent, ok_sent) == ("run-reply1", True),
+      str((run_id_sent, ok_sent)))
 check("send_reply 调 ding.reply", len(rd3.calls) == 1, str(rd3.calls))
 sent = db.one("SELECT * FROM auth_exec WHERE id=?", pending["id"])
 check("send_reply 更新为 replied", sent["exec_result"] == "replied", sent["exec_result"])
+
+# 10b. send_reply: 发送失败 → 保持 pending_reply 可重试
+class FailDing:
+    def __init__(self):
+        self.calls = []
+    def reply(self, g, t):
+        self.calls.append((g, t))
+        return False
+
+rpf = Pipeline(ReplyCfg(), db, n, FailDing())
+pending_f = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply5' AND exec_result='pending_reply'")
+run_id_f, ok_f = rpf.send_reply(pending_f["id"])
+check("send_reply 失败返回 (run_id, False)", (run_id_f, ok_f) == ("run-reply5", False),
+      str((run_id_f, ok_f)))
+row_f = db.one("SELECT * FROM auth_exec WHERE id=?", pending_f["id"])
+check("发送失败保持 pending_reply", row_f["exec_result"] == "pending_reply", row_f["exec_result"])
+check("发送失败写 reject_reason", "发送失败" in (row_f["reject_reason"] or ""), row_f["reject_reason"])
+check("发送失败留审计", db.one("SELECT 1 FROM audit_logs WHERE action='send_manual_failed' "
+                              "AND run_id='run-reply5'") is not None)
 
 # 11. reject_reply: 丢弃 pending_reply
 ReplyCfg.groups = [{"name": "test-group", "auto_reply": False}]
@@ -364,5 +405,93 @@ r_y = subprocess.run([sys.executable, os.path.join(_proj_ws, "scripts", "yuque_s
                      capture_output=True, timeout=30)
 check("同步脚本 dry-run 输出提取 prompt", r_y.returncode == 0
       and "aliyuque.antfin.com" in r_y.stdout.decode() and "actions" in r_y.stdout.decode())
+
+# 被抑制报警：解析与提示词条款
+from localagent.matcher import parse_sunfire_alert
+from localagent.engine import PROMPT_TEMPLATE
+SUP_TXT = ("2026/08/13 08:03 publish 华扬 change-flight-tp 改签底座-改签预定指标 【国际代理人】-成功率 "
+           "共有2条数据触发[warning]报警 采样: 33.39.141.229#Err#213e016817865793116126796e10e5 "
+           "底座报警群 报警统计：持续3分，已发送2条，被抑制1条 指标趋势")
+sp = parse_sunfire_alert(SUP_TXT)
+check("解析被抑制统计", sp["alert_stats"] == {"sent": 2, "suppressed": 1}, str(sp.get("alert_stats")))
+check("行内应用名兜底提取", sp["app"] == "change-flight-tp", str(sp.get("app")))
+check("提示词含被抑制取证条款",
+      "被抑制报警取证" in PROMPT_TEMPLATE and "sf alarm list" in PROMPT_TEMPLATE)
+check("提示词含仅标题报警取证条款", "仅标题报警取证" in PROMPT_TEMPLATE)
+
+# 被抑制报警（仅标题消息）命中匹配规则
+from localagent.matcher import match_alert
+SUP_ENTRY = {"alertRules": [
+    {"type": "compound_or", "rules": [
+        {"type": "keyword", "keywords": ["报警", "告警"]},
+        {"type": "format", "pattern": r"^\[\d{4}[/-]\d{2}[/-]\d{2} \d{2}:\d{2}\]"}]},
+    {"type": "keyword", "keywords": ["改签", "退票", "底座"]},
+]}
+check("抑制标题消息命中规则（横线日期）",
+      match_alert(SUP_ENTRY, {"text": "[2026-08-13 19:16]改签底座-验座明细_改签底座--国际验座失败",
+                              "sender": "sunfire"}) is not None)
+check("时间戳后非底座开头的抑制标题也命中（斜杠日期）",
+      match_alert(SUP_ENTRY, {"text": "[2026/08/14 08:20]改签底座-offer生单指标_国内-offer生单成功率",
+                              "sender": "sunfire"}) is not None)
+check("普通消息不误匹配",
+      match_alert(SUP_ENTRY, {"text": "今天中午吃什么改签底座", "sender": "x"}) is None)
+
+# owner 维度：报警带 owner=@华扬 时即使无域关键词也采集
+OWNER_ENTRY = {"alertRules": [
+    {"type": "keyword", "keywords": ["报警", "告警"]},
+    {"type": "compound_or", "rules": [
+        {"type": "keyword", "keywords": ["改签", "退票"]},
+        {"type": "keyword", "keywords": ["@华扬", "owner=华扬"]}]},
+]}
+check("owner 报警无域关键词也命中",
+      match_alert(OWNER_ENTRY, {"text": "xxx应用成功率报警 @华扬(主班) @安心(备班)",
+                                "sender": "sunfire"}) is not None)
+check("owner 维度不误匹配普通聊天",
+      match_alert(OWNER_ENTRY, {"text": "@华扬 中午一起吃饭", "sender": "x"}) is None)
+
+# ---------- 审计播报 owner 过滤 ----------
+import asyncio
+from localagent.pipeline import Pipeline
+
+
+class _OwnerCfg:
+    workspace = ws
+    agent = {}
+    notify = {"cooldown_seconds": 0}
+    dingtalk = {"reply_enabled": False, "listen_all": True, "owner_name": "华扬"}
+    auth_entries = [{"id": "rd-broadcast", "app": "dingtalk", "scope": "read",
+                     "feature": "读取底座报警群消息",
+                     "constraints": {"groups": ["改签审计报警群"]},
+                     "alertRules": [
+                         {"type": "keyword", "keywords": ["报警", "告警"]},
+                         {"type": "keyword", "keywords": ["改签"]}],
+                     "enabled": True}]
+    groups = [{"name": "改签审计报警群", "mode": "both", "enabled": True}]
+    solutions = []
+    mock = True
+
+
+class _NoopDing:
+    def reply(self, g, t):
+        pass
+
+
+BROADCAST_OTHER = ("### 改签履约-审计汇总-告警定时播报2026-08-14 10:30\n\n"
+                   "**1.【BCP】【交通】[国内改签费用审计(FLIGGY_X)](http://bcp.alibaba-inc.com/x)**\n\n"
+                   "**告警时间:** 2026-08-12 21:12:10\n\n**规则owner:** @筱剑")
+p_own = Pipeline(_OwnerCfg(), db, n, _NoopDing())
+res_other = asyncio.run(p_own.process({"msg_id": "bc-other", "group": "改签审计报警群",
+                                       "sender": "sunfire", "text": BROADCAST_OTHER,
+                                       "at_me": False}))
+check("他人owner播报不采集", res_other.get("reason") == "broadcast_owner_not_me")
+check("他人owner播报落库标记",
+      db.one("SELECT matched_rule FROM messages WHERE msg_id='bc-other'")["matched_rule"]
+      == "broadcast_not_my_owner")
+res_mine = asyncio.run(p_own.process({"msg_id": "bc-mine", "group": "改签审计报警群",
+                                      "sender": "sunfire",
+                                      "text": BROADCAST_OTHER.replace("@筱剑", "@华扬"),
+                                      "at_me": False}))
+check("本人owner播报正常进入分析", res_mine.get("reason") != "broadcast_owner_not_me"
+      and res_mine.get("run_id") is not None)
 
 print(f"\n全部 {len(PASS)} 项断言通过")

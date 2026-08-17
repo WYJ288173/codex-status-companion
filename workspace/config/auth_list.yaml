@@ -8,19 +8,33 @@ entries:
     - 改签底座质量监控
     - 改签审计报警群
   alertRules:
-  - type: keyword
-    keywords:
-    - 报警
-    - 告警
-  - type: keyword
-    keywords:
-    - 改签
-    - 退票
-    - 退改
-    - change-flight
-    - flyrp
-    - flycp
-    - 底座
+  - type: compound_or
+    rules:
+    - type: keyword
+      keywords:
+      - 报警
+      - 告警
+    - type: format
+      pattern: ^\[\d{4}[/-]\d{2}[/-]\d{2} \d{2}:\d{2}\]
+  - type: compound_or
+    rules:
+    - type: keyword
+      keywords:
+      - 改签
+      - 退票
+      - 退改
+      - change-flight
+      - flyrp
+      - flycp
+      - 底座
+    - type: keyword
+      keywords:
+      - '@华扬'
+      - 华扬(主班)
+      - 华扬 (主班)
+      - owner=华扬
+      - owner:华扬
+      - owner：华扬
   enabled: true
 - id: dingtalk-read-audit-at-me
   app: dingtalk

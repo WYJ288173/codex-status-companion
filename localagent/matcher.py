@@ -24,6 +24,8 @@ def _rule_pass(rule, msg):
         return msg["sender"] in rule.get("senders", [])
     if t == "format":
         return re.search(rule.get("pattern", ""), msg["text"]) is not None
+    if t == "compound_or":
+        return any(_rule_pass(r, msg) for r in rule.get("rules", []))
     return False
 
 
@@ -50,14 +52,22 @@ def parse_sunfire_alert(text):
     for cand in re.findall(r"^[a-z][a-z0-9-]{2,}$", text, re.M):
         app = cand
         break
+    if not app:
+        m_app = re.search(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\b", text)
+        app = m_app.group(1) if m_app else None
     m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})#Err#([0-9a-f]{16,})", text)
     metric_lines = [l.strip() for l in text.splitlines()
                     if ("当前值" in l or "成功率" in l or "触发" in l) and l.strip()]
     links = re.findall(r"https?://[^\s\)]+", text)
+    alert_stats = None
+    m_sup = re.search(r"已发送(\d+)条[，,]\s*被抑制(\d+)条", text)
+    if m_sup:
+        alert_stats = {"sent": int(m_sup.group(1)), "suppressed": int(m_sup.group(2))}
     return {"app": app, "severity": severity,
             "sample_ip": m.group(1) if m else None,
             "trace_id": m.group(2) if m else None,
-            "metrics": metric_lines[:5], "links": links[:3]}
+            "metrics": metric_lines[:5], "links": links[:3],
+            "alert_stats": alert_stats}
 
 
 _ITEM_HEAD = re.compile(

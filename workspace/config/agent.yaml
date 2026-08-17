@@ -8,7 +8,8 @@ dingtalk:
   backfill_hours: 1
   webhook_url: ''
   webhook_secret: ''
-  listen_all: false
+  listen_all: true
+  owner_name: 华扬
 engines:
   default: qodercli
   fallback:
@@ -47,7 +48,7 @@ storage:
   report_days: 90
   evidence_days: 30
   audit_days: 180
-  analysis_days: 30
+  analysis_days: 3
   archive_months: 6
   purge_months: 12
 solutions:

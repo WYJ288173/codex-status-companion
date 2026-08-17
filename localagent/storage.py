@@ -52,6 +52,7 @@ def cleanup_expired(db, workspace, cfg):
     rep_days = int(st.get("report_days", 90))
     ev_days = int(st.get("evidence_days", 30))
     audit_days = int(st.get("audit_days", 180))
+    msg_days = int(st.get("analysis_days", 3))
     deleted = {"report_dirs": 0, "evidence_dirs": 0, "audit_rows": 0, "message_rows": 0}
 
     for day in _day_dirs(os.path.join(workspace, "reports"), _cutoff(rep_days)):
@@ -68,14 +69,14 @@ def cleanup_expired(db, workspace, cfg):
                         (_cutoff(audit_days),))
     deleted["audit_rows"] = r.rowcount
     r = db.conn.execute("DELETE FROM messages WHERE substr(received_at,1,10) < ?",
-                        (_cutoff(audit_days),))
+                        (_cutoff(msg_days),))
     deleted["message_rows"] = r.rowcount
     db.conn.commit()
     db.audit("storage", "cleanup_expired", "", str(deleted))
     return deleted
 
 
-def cleanup_analysis(db, days=30):
+def cleanup_analysis(db, days=3):
     """删除超过指定天数的分析记录（runs/alerts/auth_exec/evidence/reports_meta/messages）。"""
     cutoff = _cutoff(days)
     deleted = 0

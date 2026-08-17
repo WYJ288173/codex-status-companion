@@ -35,12 +35,15 @@ def _parse_ts(s):
     return ts
 
 
-def build_context(db, text, codes, run_id=None, window_min=10):
-    """检索窗口内同类历史 run 并研判；同类≥2 条（含当前）返回关联上下文，否则 None。"""
+def build_context(db, text, codes, run_id=None, window_min=30):
+    """检索窗口内同类历史 run 并研判；同类≥2 条（含当前）返回关联上下文，否则 None。
+    窗口取 30 分钟以支撑「持续 >10 分钟」判定；近 10 分钟子窗口用于风险分级。"""
     key = family_key(text, codes)
     if not key:
         return None
-    cutoff = datetime.now() - timedelta(minutes=window_min)
+    now = datetime.now()
+    cutoff = now - timedelta(minutes=window_min)
+    recent_cutoff = now - timedelta(minutes=10)
     rows = db.q("SELECT run_id, source_text, started_at FROM runs "
                 "WHERE started_at IS NOT NULL ORDER BY started_at DESC LIMIT 200")
     peers = []
@@ -51,18 +54,36 @@ def build_context(db, text, codes, run_id=None, window_min=10):
         if not ts or ts < cutoff:
             continue
         if family_key(r["source_text"] or "") == key:
-            peers.append(r)
+            peers.append({"run_id": r["run_id"], "source_text": r["source_text"], "ts": ts})
     if not peers:
         return None
     orders = set(extract_orders(text))
+    recent_orders = set(extract_orders(text))
     for p in peers:
-        orders |= set(extract_orders(p["source_text"]))
+        po = set(extract_orders(p["source_text"]))
+        orders |= po
+        if p["ts"] >= recent_cutoff:
+            recent_orders |= po
     orders = sorted(orders)
     same_order = len(orders) == 1
     batch = len(orders) >= 2
+    ts_all = [p["ts"] for p in peers] + [now]
+    span_min = (max(ts_all) - min(ts_all)).total_seconds() / 60
+    # 持续性：近 10 分钟滚动窗口内出现 ≥2 个不同失败订单（含当前）视为持续有新订单失败
+    sustained = len(recent_orders) >= 2
+    m = len(orders)
+    if len(recent_orders) >= 5 or (span_min > 10 and sustained):
+        risk = "high"
+    elif m >= 3:
+        risk = "medium"
+    else:
+        risk = "low"
     return {"type_key": key, "window_min": window_min,
             "count": len(peers) + 1, "orders": orders,
             "same_order": same_order, "batch": batch,
+            "span_min": round(span_min, 1),
+            "recent_order_count": len(recent_orders),
+            "sustained": sustained, "risk_level": risk,
             "peer_runs": [p["run_id"] for p in peers][:20]}
 
 
@@ -71,14 +92,23 @@ def render_context(corr):
     if not corr:
         return ""
     kind = corr["type_key"].split(":", 1)[1]
+    risk = corr.get("risk_level", "medium")
     if corr["same_order"]:
         impact = (f"仅涉及同一订单 {corr['orders'][0]} 的频繁重试，影响面=单一用户，"
                   f"定级不升级，结论须注明『单订单重试，影响单一用户』")
     elif corr["batch"]:
-        impact = (f"涉及 {len(corr['orders'])} 个不同订单均失败——批量问题信号！必须追加取证："
-                  f"①用 sunfire-cli 查该类操作成功率/失败量趋势确认是否整体下跌；"
-                  f"②排查近 30 分钟内相关应用是否有发布/配置变更/开关动作；"
-                  f"判定是否发布或其他动作导致的批量问题")
+        base = (f"涉及 {len(corr['orders'])} 个不同订单均失败（窗口跨度 {corr.get('span_min', 0)} 分钟，"
+                f"近10分钟新订单 {corr.get('recent_order_count', 0)} 个），风险等级={risk}。")
+        if risk == "high":
+            impact = (base + "高风险批量失败！必须追加取证：①用 sunfire-cli 查该类操作成功率/失败量趋势；"
+                      "②排查近 30 分钟内相关应用发布/配置变更/开关动作；"
+                      "conclusion/summary 必须明确提醒『批量失败可能代表系统出现问题，需人工介入排查』并列出订单号")
+        elif risk == "medium":
+            impact = (base + "批量问题信号，必须追加取证：①用 sunfire-cli 查该类操作成功率/失败量趋势确认是否整体下跌；"
+                      "②排查近 30 分钟内相关应用是否有发布/配置变更/开关动作")
+        else:
+            impact = (base + "≤2 订单且无持续新订单报警，属偶发，影响面小，定级不升级（≤P3），"
+                      "结论须注明『偶发批量失败，影响面小』，给出涉及订单号")
     else:
         impact = "未提取到订单号，按报警内容研判影响面"
     return (f"【同类报警关联】近 {corr['window_min']} 分钟内同类报警（{kind}）共 {corr['count']} 条，"
@@ -87,20 +117,30 @@ def render_context(corr):
 
 
 def apply_batch_escalation(result, corr):
-    """批量问题定级兜底：多订单批量失败时 anomalies 至少 P2（引擎已给 P1 则保留）。
-    单订单重试不升级。返回是否发生升级。"""
+    """批量问题分级定级兜底：high→至少P1，medium→至少P2，low→不升级。
+    引擎已给更高定级则保留。单订单重试不升级。返回是否发生升级。"""
     if not corr or not corr.get("batch") or result.get("normal"):
         return False
+    risk = corr.get("risk_level", "medium")
+    if risk == "low":
+        result["correlation"] = corr
+        return False
+    target = "P1" if risk == "high" else "P2"
     ans = result.get("anomalies") or []
     sevs = [a.get("severity") for a in ans if isinstance(a, dict)]
-    if "P1" in sevs or "P2" in sevs:
+    rank = {"P1": 3, "P2": 2, "P3": 1, "OK": 0}
+    if any(rank.get(s, 0) >= rank[target] for s in sevs):
+        result["correlation"] = corr
         return False
     n, m = corr["count"], len(corr["orders"])
+    suffix = (f"（{n}条同类/{m}订单批量高风险，升级{target}，可能系统问题需人工介入）" if risk == "high"
+              else f"（{n}条同类/{m}订单批量，升级{target}）")
     if ans and isinstance(ans[0], dict):
-        ans[0]["severity"] = "P2"
-        ans[0]["summary"] = f"{ans[0].get('summary', '')}（{n}条同类/{m}订单批量，升级P2）"[:60]
+        ans[0]["severity"] = target
+        ans[0]["summary"] = f"{ans[0].get('summary', '')}{suffix}"[:60]
     else:
         result.setdefault("anomalies", []).append(
-            {"severity": "P2", "summary": f"多订单批量失败（{n}条同类/{m}订单），需排查发布/变更关联"})
+            {"severity": target,
+             "summary": f"多订单批量失败（{n}条同类/{m}订单），需排查发布/变更关联"})
     result["correlation"] = corr
     return True
