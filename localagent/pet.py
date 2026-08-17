@@ -17,24 +17,17 @@ font:11px -apple-system,'PingFang SC';padding:6px 8px;border-radius:8px;display:
 #menu div{padding:6px 12px;font:12px -apple-system,'PingFang SC';color:#e6edf3;cursor:pointer;white-space:nowrap}
 #menu div:hover{background:#22303a}
 #menu div.danger{color:#f87171}
-#modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;
-color:#e6edf3;font:11px -apple-system,'PingFang SC';padding:6px;z-index:10}
-#modal .box{background:#161d21;border:1px solid #f59e0b;border-radius:10px;padding:6px;max-height:88px;overflow:auto}
-button{background:#00c16a;border:0;border-radius:6px;padding:4px 8px;margin:2px;cursor:pointer}
-button.gray{background:#374151;color:#e6edf3}
-button.arm{background:#f87171;color:#111}
 </style></head><body><div id="wrap">
 <img id="img" class="idle"><div id="dot"></div><div id="badge"></div>
 <div id="toast"></div><div id="bubble"></div>
 <div id="menu"></div>
-<div id="modal"><b style="color:#f59e0b">⚠ 待确认异常</b><div class="box" id="mlist"></div></div>
 </div>
 <script>
 const base='http://127.0.0.1:PORT';
 const ASSETS='ASSETS_URL';
 const EXT=EXT_MAP;
 function srcOf(st){return ASSETS+st+'.'+(EXT[st]||'png')}
-let lastToastTs='', lastReport='', pinned=false, paused=false, curStatus='', S=null;
+let lastToastTs='', lastReport='', pinned=false, paused=false, curStatus='', S=null, prevPending=0;
 function el(id){return document.getElementById(id)}
 function api(){return window.pywebview&&window.pywebview.api}
 function openU(path){const a=api(); if(a) a.open_url(path)}
@@ -53,6 +46,10 @@ function renderBubble(){
  else if(!pinned && b.dataset.hover==='1' && S){ b.textContent=bubbleText(S,S.pending.length); b.style.display='block'; }
  else b.style.display='none';
 }
+function flashToast(text){
+ el('toast').style.display='block'; el('toast').textContent=text;
+ setTimeout(()=>el('toast').style.display='none', 4000);
+}
 async function tick(){
  try{
   S=await (await fetch(base+'/api/state')).json();
@@ -62,27 +59,11 @@ async function tick(){
   lastReport=S.last_report||''; paused=!!S.paused;
   const n=S.pending.length;
   el('badge').style.display=n?'block':'none'; el('badge').textContent=n;
-  el('modal').style.display=n?'block':'none';
-  if(n){
-    el('mlist').innerHTML=S.pending.map(a=>`<div>[${a.severity}] ${a.summary}<br>
-      <button onclick="op('${a.alert_id}','ack')">确认</button>
-      <button class="gray" onclick="twoStep(this,()=>op('${a.alert_id}','ignore'),'确认忽略?')">忽略</button>
-      ${a.report_path?`<button class="gray" onclick="openU('/reports/by-path?p='+encodeURIComponent('${a.report_path}'))">查看报告</button>`:''}
-      <button class="gray" onclick="closeModal()">关闭</button></div>`).join('');
-  }
-  if(S.toast_ts!==lastToastTs && S.toast){ lastToastTs=S.toast_ts;
-    el('toast').style.display='block'; el('toast').textContent=S.toast;
-    setTimeout(()=>el('toast').style.display='none', 4000); }
+  if(n>prevPending){ flashToast(`新增 ${n-prevPending} 条待确认异常，点我打开报警中心`); }
+  prevPending=n;
+  if(S.toast_ts!==lastToastTs && S.toast){ lastToastTs=S.toast_ts; flashToast(S.toast); }
   renderBubble();
  }catch(e){}
-}
-function closeModal(){el('modal').style.display='none'}
-async function op(id,act){await fetch(base+'/alerts/'+id+'/'+act,{method:'POST'});tick()}
-function twoStep(btn,fn,label){
- if(btn.dataset.armed==='1'){fn();return}
- btn.dataset.armed='1'; btn.dataset.old=btn.textContent;
- btn.textContent=label||'再点一次确认'; btn.classList.add('arm');
- setTimeout(()=>{btn.dataset.armed='0';btn.textContent=btn.dataset.old;btn.classList.remove('arm')},3000);
 }
 function showMenu(x,y){
  const m=el('menu');
@@ -100,7 +81,7 @@ function showMenu(x,y){
    d.onclick=e=>{e.stopPropagation();m.style.display='none';fn()};m.appendChild(d)});
  m.style.left=Math.min(x,16)+'px'; m.style.top=Math.min(y,28)+'px'; m.style.display='block';
 }
-el('toast').addEventListener('click',()=>openU(lastReport?'/reports/by-path?p='+encodeURIComponent(lastReport):'/'));
+el('toast').addEventListener('click',()=>openU('/alerts'));
 img.addEventListener('dblclick',()=>openU('/'));
 el('dot').addEventListener('dblclick',()=>openU('/'));
 el('wrap').addEventListener('click',e=>{

@@ -192,12 +192,24 @@ check("端点 send_reply 异常兜底", "send_reply_error" in src)
 check("卡片展示 alert_type 徽标", "pl.get('alert_type')" in src)
 check("失败/引擎不可用卡片带重新分析按钮",
       'in ("failed", "engine_unavailable")' in src and "重新分析</button>" in src)
-check("api_state 按 running 推导 working",
-      "WHERE status='running' LIMIT 1" in src and '"working" if has_running' in src)
+check("api_state 状态优先级 working>attention>error>idle",
+      "WHERE status='running' LIMIT 1" in src
+      and 'status = "working"' in src and 'status = "error"' in src
+      and 'in ("failed", "engine_unavailable")' in src)
 check("webapp 启用 CORS 供悬浮窗跨域轮询",
       "CORSMiddleware" in src and 'allow_origins=["*"]' in src)
 check("trigSol confirm 换行已转义（防 JS 语法错误致按钮全失效）",
       "？\\\\n将按方案" in src and "？\n将按方案" not in src)
 check("reanalyze 前端走 jfetch 容错", "jfetch('/api/reanalyze/'" in src)
+
+# ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
+petsrc = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "pet.py"),
+              encoding="utf-8").read()
+check("悬浮窗已移除待确认异常 modal",
+      "<div id=\"modal\">" not in petsrc and "id='mlist'" not in petsrc
+      and "id=\"mlist\"" not in petsrc)
+check("悬浮窗不再内嵌确认/忽略操作", "'ack'" not in petsrc and "twoStep" not in petsrc)
+check("待确认增量一行提醒", "新增 ${n-prevPending} 条待确认异常" in petsrc)
+check("徽标数字保留", "el('badge').textContent=n" in petsrc)
 
 print(f"\n全部 {len(PASS)} 项断言通过")

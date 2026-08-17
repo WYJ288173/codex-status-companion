@@ -1512,12 +1512,21 @@ const r=await fetch('/api/storage/'+op,{{method:'POST'}});const j=await r.json()
     @app.get("/api/state")
     def api_state():
         has_running = db.one("SELECT 1 FROM runs WHERE status='running' LIMIT 1") is not None
-        status = ("working" if has_running
-                  else "attention" if app_ctx.notifier.pending()
-                  else db.get_state("agent_status", "idle"))
+        pending = app_ctx.notifier.pending()
+        last = db.one("SELECT source, status, started_at FROM runs WHERE "
+                      "(trigger_type IS NULL OR trigger_type != 'simulate')"
+                      " ORDER BY started_at DESC LIMIT 1")
+        if has_running:
+            status = "working"
+        elif pending:
+            status = "attention"
+        elif last and last["status"] in ("failed", "engine_unavailable"):
+            status = "error"
+        else:
+            status = db.get_state("agent_status", "idle")
         return {
             "status": status,
-            "pending": app_ctx.notifier.pending(),
+            "pending": pending,
             "toast": db.get_state("pet_toast", ""),
             "toast_ts": db.get_state("pet_toast_ts", ""),
             "last_report": db.get_state("last_report", ""),
@@ -1527,10 +1536,8 @@ const r=await fetch('/api/storage/'+op,{{method:'POST'}});const j=await r.json()
             "writes_disabled": bool(app_ctx.cfg.agent.get("writes_disabled", False)),
             "paused": db.get_state("tasks_paused") == "1",
             "today_alerts": db.one("SELECT COUNT(*) c FROM alerts WHERE date(created_at)=date('now','localtime')")["c"],
-            "last_run": (lambda r: f"{r['source']} {r['status']} {r['started_at'][:16]}" if r else "")(
-                db.one("SELECT source, status, started_at FROM runs WHERE "
-                       "(trigger_type IS NULL OR trigger_type != 'simulate')"
-                       " ORDER BY started_at DESC LIMIT 1")),
+            "last_run": (f"{last['source']} {last['status']} {last['started_at'][:16]}"
+                         if last else ""),
         }
 
     @app.get("/assets/{path:path}")
