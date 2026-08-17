@@ -443,22 +443,37 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                  f"{'监听处理所有告警消息' if listen_all else '仅处理@我的消息'}"
                  f"（<a style='color:#7ee7b0' href='/groups'>配置</a>）</p>")
         # 消息清单（与报警共用统一时间窗口，20 条/页分页，卡片化展示）
+        # 窗口按「有效消息时间」过滤/排序：msg_time（钉群时间）→ 正文告警时间 → 采集时间，
+        # 与钉群所见一致，避免 dws 延迟回填的老消息占据近期窗口
         from . import render as rdr
+        cutoff_cmp = cutoff[:19].replace("T", " ")
         msg_sql = ("SELECT m.*, r.status AS run_status, r.report_path AS report_path "
-                   "FROM messages m LEFT JOIN runs r ON m.run_id=r.run_id WHERE m.received_at >= ?")
-        msg_args = [cutoff]
+                   "FROM messages m LEFT JOIN runs r ON m.run_id=r.run_id "
+                   "WHERE REPLACE(substr(m.received_at,1,19),'T',' ') >= ?")
+        msg_args = [cutoff_cmp]
         if f_group:
             msg_sql += " AND m.group_name LIKE ?"; msg_args.append(f"%{f_group}%")
         if f_rule:
             msg_sql += " AND m.matched_rule=?"; msg_args.append(f_rule)
         if kw:
             msg_sql += " AND m.source_text LIKE ?"; msg_args.append(f"%{kw}%")
+
+        def _eff_time(m):
+            mt = (m["msg_time"] or "").strip().replace("T", " ")
+            if len(mt) >= 16:
+                return mt
+            at = alert_time_of(m["source_text"])
+            if at:
+                return f"{datetime.now(CST).year}-{at}"
+            return (m["received_at"] or "")[:19].replace("T", " ")
+
+        rows_win = [r for r in db.q(msg_sql, *msg_args) if _eff_time(r) >= cutoff_cmp]
+        rows_win.sort(key=_eff_time, reverse=True)
         PAGE_SZ = 20
-        total_msg = db.one("SELECT COUNT(*) c FROM (" + msg_sql + ")", *msg_args)["c"]
+        total_msg = len(rows_win)
         msg_pages = max(1, (total_msg + PAGE_SZ - 1) // PAGE_SZ)
         msg_page = max(1, min(msg_page, msg_pages))
-        msg_rows = db.q(msg_sql + " ORDER BY m.received_at DESC LIMIT ? OFFSET ?",
-                        *msg_args, PAGE_SZ, (msg_page - 1) * PAGE_SZ)
+        msg_rows = rows_win[(msg_page - 1) * PAGE_SZ: msg_page * PAGE_SZ]
         groups = [r["g"] for r in db.q("SELECT DISTINCT group_name g FROM messages WHERE received_at >= ?", cutoff)]
         rules = [r["v"] for r in db.q(
             "SELECT DISTINCT matched_rule v FROM messages WHERE received_at >= ? AND matched_rule IS NOT NULL", cutoff)]

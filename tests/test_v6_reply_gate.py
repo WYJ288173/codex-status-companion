@@ -258,6 +258,9 @@ dbsrc = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "db.py"
 check("采集钉群消息 createTime", '"msg_time": m.get("createTime")' in dingsrc)
 check("messages 表 msg_time 迁移", "ALTER TABLE messages ADD COLUMN msg_time" in dbsrc)
 check("卡片主时间优先 msg_time", "mt[5:16] if len(mt) >= 16" in src)
+check("消息窗口按有效消息时间过滤（msg_time→正文时间→采集时间，防延迟回填老消息）",
+      "def _eff_time" in src and "alert_time_of(m[\"source_text\"])" in src
+      and "rows_win.sort(key=_eff_time, reverse=True)" in src)
 
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",
