@@ -241,6 +241,15 @@ check("告警时间解析（横杠格式）", alert_time_of("2026-08-17 08:50 xx
 check("告警时间解析（斜杠格式）", alert_time_of("2026/08/17 09:49\n发布") == "08-17 09:49")
 check("无时间戳回退空串", alert_time_of("无时间文本") == "")
 
+# ---------- 7. 归类兜底（Sunfire 噪音卡片无家族关键词） ----------
+from localagent import correlate as corrmod
+check("监控项「改签预定指标」兜底归类为预订",
+      corrmod.family_key("监控项: [改签底座-改签预定指标] 预警规则: 【国内旗舰店】-成功率") == "kw:预订")
+check("offer 生单指标兜底归类为生单",
+      corrmod.family_key("监控项: [改签底座-offer生单指标]") == "kw:生单")
+check("正文含家族词时优先正文（不走兜底）",
+      corrmod.family_key("验价失败 订单1234567890123") == "kw:验价")
+
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",
       "<div id=\"modal\">" not in petsrc and "id='mlist'" not in petsrc

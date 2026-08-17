@@ -8,13 +8,30 @@ ORDER_RE = re.compile(r"(?<!\d)(\d{10,20})(?!\d)")
 # 同类归组家族：验价失败/验价成功率下跌/验价失败量上升等同关键词报警归为一类
 FAMILIES = ("验价", "询价", "验座", "预订", "生单", "支付", "出票", "退款", "改签超时")
 
+# 兜底归类：报警正文无家族关键词时（如 Sunfire 噪音卡片），按监控项/规则名二次归类
+MONITOR_PATTERNS = (
+    ("预定", "预订"),
+    ("预订", "预订"),
+    ("生单", "生单"),
+    ("offer", "生单"),
+    ("验价", "验价"),
+    ("询价", "询价"),
+    ("验座", "验座"),
+    ("出票", "出票"),
+    ("支付", "支付"),
+    ("退款", "退款"),
+)
+
 
 def family_key(text, codes=None):
-    """归组键：优先文本关键词家族；无关键词时退化为首个告警码；都没有返回 None。"""
+    """归组键：优先文本关键词家族；无关键词时按监控项名兜底归类；再退化为首个告警码；都没有返回 None。"""
     t = text or ""
     for kw in FAMILIES:
         if kw in t:
             return f"kw:{kw}"
+    for pat, fam in MONITOR_PATTERNS:
+        if pat in t:
+            return f"kw:{fam}"
     if codes:
         return f"code:{codes[0]}"
     return None
