@@ -20,3 +20,4 @@ __pycache__/
 .parse_*.py
 .flyeye_*.json
 .tmp/
+.tmp_*
