@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import resource
 import threading
 
@@ -33,6 +34,17 @@ input,select{background:#0f1417;color:#e6edf3;border:1px solid #22303a;border-ra
 </header><main>{body}</main></body></html>"""
 
 TEST_FILTER = "(r.trigger_type IS NULL OR r.trigger_type != 'simulate')"
+
+# 报警原文内嵌的告警时间（如 2026-08-17 08:50 / 2026/08/17 08:50），与钉群展示时间对应
+ALERT_TS_RE = re.compile(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})")
+
+
+def alert_time_of(text):
+    tm = ALERT_TS_RE.search(text or "")
+    if not tm:
+        return ""
+    return (f"{int(tm.group(2)):02d}-{int(tm.group(3)):02d} "
+            f"{int(tm.group(4)):02d}:{tm.group(5)}")
 
 
 def build_app(app_ctx):
@@ -333,6 +345,9 @@ for(const id of ids){await fetch('/alerts/'+id+'/'+op,{method:'POST'})}location.
 async function reanalyze(run){const note=prompt('分析哪里不准？补充你的判断/线索，将携带该输入重新触发分析：');if(note===null)return;try{
 const j=await jfetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:note})});
 alert(j.new_run?('已触发重新分析：'+j.new_run):('失败：'+(j.error||'')));location.reload()}catch(e){alert('触发失败：'+e.message)}}
+async function retryFailed(run){if(!confirm('对该失败任务发起重新分析？'))return;try{
+const j=await jfetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:'失败重试'})});
+alert(j.new_run?('已触发重新分析：'+j.new_run):('失败：'+(j.error||'')));location.reload()}catch(e){alert('触发失败：'+e.message)}}
 async function trigSol(alertId,code,reqParams){let params={};
 for(const k of (reqParams||[])){const v=prompt('方案 '+code+' 需要参数 '+k+'，请输入：');if(v===null)return;params[k]=v.trim()}
 if(!confirm('手动触发解决方案 '+code+'？\\n将按方案生成执行计划并进入二次确认（不会立即执行写操作）。'))return;
@@ -507,7 +522,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                           if rp else f"<span style='color:{color}'>{label}</span>")
                 if m.get("run_status") in ("failed", "engine_unavailable"):
                     st_tag += (f" <button class='gray' style='font-size:11px;padding:1px 8px' "
-                               f"onclick=\"reanalyze('{_esc(m['run_id'])}')\">重新分析</button>")
+                               f"onclick=\"retryFailed('{_esc(m['run_id'])}')\">重新分析</button>")
             else:
                 st_tag = (f"<span style='color:#9fb3c0'>"
                           f"{_rule_style.get(m.get('matched_rule') or '', '未分析')}</span>")
@@ -520,11 +535,16 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                 anchor = "reply_first" if not reply_anchor["done"] else ""
                 reply_anchor["done"] = True
                 reply_block = reply_html(pending_reply_map[m["run_id"]], anchor)
+            a_ts = alert_time_of(m.get("source_text"))
+            recv_t = (m.get('received_at') or '')[5:16].replace('T', ' ')
+            time_cell = (f"<span>{a_ts}</span> <span style='color:#9fb3c0;font-size:11px' "
+                         f"title='LocalAgent 采集到该消息的时间'>采集 {recv_t}</span>"
+                         if a_ts else f"<span style='color:#9fb3c0'>{recv_t}</span>")
             msg_out += (
                 "<div style='border:1px solid #22303a;border-radius:8px;padding:10px;margin-bottom:8px;"
                 "background:#0f1417'>"
                 f"<div style='display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px'>"
-                f"<span style='color:#9fb3c0'>{_esc((m.get('received_at') or '')[5:19])}</span>"
+                f"<span style='color:#e6edf3'>{time_cell}</span>"
                 f"<span style='background:#22303a;border-radius:4px;padding:1px 8px'>"
                 f"{_esc(m.get('group_name'))}</span>"
                 f"<span style='color:#9fb3c0'>{_esc(m.get('sender'))}</span>{chips}"
@@ -1508,6 +1528,15 @@ const r=await fetch('/api/storage/'+op,{{method:'POST'}});const j=await r.json()
         if op == "enforce_quota":
             return {"cleaned": st.enforce_quota(db, ws, app_ctx.cfg)}
         return {"error": "未知操作"}
+
+    @app.get("/api/open")
+    def api_open(path: str = "/"):
+        """供悬浮窗/菜单栏调用：在系统默认浏览器打开管理页。
+        不走 pywebview api，避免 WKWebView 把小窗自身导航成目标页。"""
+        import webbrowser
+        safe = path if path.startswith("/") else "/" + path
+        webbrowser.open(f"http://127.0.0.1:{app_ctx.cfg.web.get('port', 8765)}{safe}")
+        return {"ok": True}
 
     @app.get("/api/state")
     def api_state():

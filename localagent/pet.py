@@ -30,7 +30,7 @@ function srcOf(st){return ASSETS+st+'.'+(EXT[st]||'png')}
 let lastToastTs='', lastReport='', pinned=false, paused=false, curStatus='', S=null, prevPending=0;
 function el(id){return document.getElementById(id)}
 function api(){return window.pywebview&&window.pywebview.api}
-function openU(path){const a=api(); if(a) a.open_url(path)}
+function openU(path){fetch(base+'/api/open?path='+encodeURIComponent(path)).catch(()=>{const a=api(); if(a) a.open_url(path)})}
 const img=el('img');
 img.onerror=()=>{img.style.display='none';el('dot').style.display='block'};
 img.src=srcOf('idle');

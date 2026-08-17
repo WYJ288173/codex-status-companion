@@ -183,6 +183,8 @@ check("自动成功留 reply_auto 审计",
 # ---------- 5. 前端与页面源码断言 ----------
 src = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "webapp.py"),
            encoding="utf-8").read()
+petsrc = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "pet.py"),
+              encoding="utf-8").read()
 check("前端 sendReply 有 r.ok 检查", "async function jfetch" in src and "if(!r.ok)" in src)
 check("前端 sendReply 有 try/catch", "catch(e){alert('发送失败" in src)
 check("groups 页 checkbox 编辑器", "gsaveTypes" in src and "input type='checkbox'" in src)
@@ -201,10 +203,18 @@ check("webapp 启用 CORS 供悬浮窗跨域轮询",
 check("trigSol confirm 换行已转义（防 JS 语法错误致按钮全失效）",
       "？\\\\n将按方案" in src and "？\n将按方案" not in src)
 check("reanalyze 前端走 jfetch 容错", "jfetch('/api/reanalyze/'" in src)
+check("失败卡片重新分析免输入（retryFailed）",
+      "async function retryFailed" in src and "retryFailed('{_esc(m['run_id'])}')" in src)
+check("悬浮窗打开页面走 /api/open（防小窗自身导航）",
+      "api/open?path=" in petsrc and "@app.get(\"/api/open\")" in src)
+check("卡片展示告警原文时间+采集时间", "alert_time_of" in src and "采集 {recv_t}" in src)
+
+from localagent.webapp import alert_time_of
+check("告警时间解析（横杠格式）", alert_time_of("2026-08-17 08:50 xx报警") == "08-17 08:50")
+check("告警时间解析（斜杠格式）", alert_time_of("2026/08/17 09:49\n发布") == "08-17 09:49")
+check("无时间戳回退空串", alert_time_of("无时间文本") == "")
 
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
-petsrc = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "pet.py"),
-              encoding="utf-8").read()
 check("悬浮窗已移除待确认异常 modal",
       "<div id=\"modal\">" not in petsrc and "id='mlist'" not in petsrc
       and "id=\"mlist\"" not in petsrc)
