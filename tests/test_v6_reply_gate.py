@@ -210,7 +210,8 @@ check("悬浮窗打开页面走 /api/open（防小窗自身导航）",
       "api/open?path=" in petsrc and "@app.get(\"/api/open\")" in src)
 check("openU 不再回退 pywebview api 桥", "a.open_url(path)" not in petsrc)
 check("悬浮窗导航守卫存在", "pet_nav_guard_restored" in petsrc and "w.load_html(html)" in petsrc)
-check("单击不再固定气泡（防文本面板覆盖图标）", "pinned" not in petsrc)
+check("气泡已整体移除（单击/悬停均不再显示状态文本）",
+      "bubble" not in petsrc and "pinned" not in petsrc)
 
 # DOM 仿真：stub DOM 后执行真实 pet 脚本，验证单击/悬停/toast 行为
 import shutil

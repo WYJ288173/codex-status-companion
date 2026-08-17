@@ -35,7 +35,7 @@ global.document = {
   addEventListener(ev, fn) { (this._listeners[ev] = this._listeners[ev] || []).push(fn); },
 };
 global.setInterval = () => 0;   // 不跑轮询定时器
-global.setTimeout = (fn) => 0;  // 不跑 toast 收起定时器
+global.setTimeout = (fn) => { setImmediate(fn); return 0; };  // toast 立即收起，便于断言
 
 const js = fs.readFileSync(process.argv[2], 'utf-8');
 eval(js);
@@ -47,29 +47,30 @@ function assert(name, cond) {
 
 setTimeout === null; // noop
 (async () => {
-  // 等首次 tick 完成（脚本末尾 tick() 是 async）
+  // 等首次 tick 完成（脚本末尾 tick() 是 async），toast 收起
+  await new Promise(r => setImmediate(r));
   await new Promise(r => setImmediate(r));
   await new Promise(r => setImmediate(r));
 
-  // 1. 单击 wrap：气泡不得显示（修复点）
+  // 1. 单击 wrap：不得有任何内容显示（气泡已整体移除）
   els.wrap.dispatch('click');
-  assert('单击后气泡仍隐藏', els.bubble.style.display === 'none');
+  assert('单击后无任何内容显示', els.toast.style.display === 'none' && els.menu.style.display === 'none');
 
-  // 2. 悬停显示气泡，移开收起
+  // 2. 悬停不再有任何响应（mouseenter/mouseleave 监听已移除）
   els.wrap.dispatch('mouseenter');
-  assert('悬停显示气泡', els.bubble.style.display === 'block');
+  assert('悬停无响应', els.toast.style.display === 'none' && els.menu.style.display === 'none');
   els.wrap.dispatch('mouseleave');
-  assert('移开收起气泡', els.bubble.style.display === 'none');
 
-  // 3. 连续多次单击也不得显示气泡
+  // 3. 连续多次单击也不得显示任何内容
   for (let i = 0; i < 5; i++) els.wrap.dispatch('click');
-  assert('连续单击后气泡仍隐藏', els.bubble.style.display === 'none');
+  assert('连续单击后仍无内容显示', els.toast.style.display === 'none' && els.menu.style.display === 'none');
 
   // 4. 点击 toast 只产生 /api/open 请求（窗内无导航）
   els.toast.dispatch('click');
   assert('toast 点击走 /api/open', fetchCalls.some(u => u.includes('/api/open?path=%2Falerts')));
 
-  // 5. 源码无残留 pinned 逻辑
+  // 5. 源码无气泡/固定残留
+  assert('无 bubble 残留', !js.includes('bubble'));
   assert('无 pinned 残留', !js.includes('pinned'));
   console.log('PET_DOM_SIM_OK');
 })();

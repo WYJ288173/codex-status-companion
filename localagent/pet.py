@@ -11,15 +11,13 @@ img{width:80px;height:80px;position:absolute;left:10px;top:10px;border-radius:18
 color:#7ee7b0;font:11px -apple-system,'PingFang SC';padding:4px 6px;border-radius:8px;display:none;cursor:pointer}
 #badge{position:absolute;right:6px;top:6px;background:#f59e0b;color:#111;border-radius:10px;
 padding:1px 6px;font:11px sans-serif;display:none}
-#bubble{position:absolute;left:2px;top:0;max-width:150px;background:rgba(22,29,33,.95);color:#e6edf3;
-font:11px -apple-system,'PingFang SC';padding:6px 8px;border-radius:8px;display:none;white-space:pre-line;z-index:8}
 #menu{position:absolute;background:#161d21;border:1px solid #22303a;border-radius:8px;display:none;z-index:9}
 #menu div{padding:6px 12px;font:12px -apple-system,'PingFang SC';color:#e6edf3;cursor:pointer;white-space:nowrap}
 #menu div:hover{background:#22303a}
 #menu div.danger{color:#f87171}
 </style></head><body><div id="wrap">
 <img id="img" class="idle"><div id="dot"></div><div id="badge"></div>
-<div id="toast"></div><div id="bubble"></div>
+<div id="toast"></div>
 <div id="menu"></div>
 </div>
 <script>
@@ -34,17 +32,6 @@ function openU(path){fetch(base+'/api/open?path='+encodeURIComponent(path)).catc
 const img=el('img');
 img.onerror=()=>{img.style.display='none';el('dot').style.display='block'};
 img.src=srcOf('idle');
-function bubbleText(s,n){
- return `状态:${s.status} | 钉钉:${s.ding_conn}`
-  + `\\n最近任务:${s.last_run||'无'}`
-  + `\\n今日异常:${s.today_alerts} 待确认:${n}`
-  + (s.paused?' | 已暂停':'') + (s.writes_disabled?' | 写已禁用':'');
-}
-function renderBubble(){
- const b=el('bubble');
- if(b.dataset.hover==='1' && S){ b.textContent=bubbleText(S,S.pending.length); b.style.display='block'; }
- else b.style.display='none';
-}
 function flashToast(text){
  el('toast').style.display='block'; el('toast').textContent=text;
  setTimeout(()=>el('toast').style.display='none', 4000);
@@ -61,7 +48,6 @@ async function tick(){
   if(n>prevPending){ flashToast(`新增 ${n-prevPending} 条待确认异常，点我打开报警中心`); }
   prevPending=n;
   if(S.toast_ts!==lastToastTs && S.toast){ lastToastTs=S.toast_ts; flashToast(S.toast); }
-  renderBubble();
  }catch(e){}
 }
 function showMenu(x,y){
@@ -86,8 +72,6 @@ el('dot').addEventListener('dblclick',()=>openU('/'));
 el('wrap').addEventListener('click',e=>{
  if(el('menu').style.display==='block'){el('menu').style.display='none'}
 });
-el('wrap').addEventListener('mouseenter',()=>{el('bubble').dataset.hover='1';renderBubble()});
-el('wrap').addEventListener('mouseleave',()=>{el('bubble').dataset.hover='0';renderBubble()});
 document.addEventListener('contextmenu',e=>{e.preventDefault();showMenu(e.clientX,e.clientY)});
 document.addEventListener('click',e=>{if(!el('menu').contains(e.target))el('menu').style.display='none'});
 setInterval(tick,2000);tick();
