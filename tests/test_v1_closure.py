@@ -476,9 +476,9 @@ class _NoopDing:
         pass
 
 
-BROADCAST_OTHER = ("### 改签履约-审计汇总-告警定时播报2026-08-14 10:30\n\n"
+BROADCAST_OTHER = ("### 改签履约-审计汇总-告警定时播报" + now()[:16].replace("T", " ") + "\n\n"
                    "**1.【BCP】【交通】[国内改签费用审计(FLIGGY_X)](http://bcp.alibaba-inc.com/x)**\n\n"
-                   "**告警时间:** 2026-08-12 21:12:10\n\n**规则owner:** @筱剑")
+                   "**告警时间:** " + now()[:19].replace("T", " ") + "\n\n**规则owner:** @筱剑")
 p_own = Pipeline(_OwnerCfg(), db, n, _NoopDing())
 res_other = asyncio.run(p_own.process({"msg_id": "bc-other", "group": "改签审计报警群",
                                        "sender": "sunfire", "text": BROADCAST_OTHER,

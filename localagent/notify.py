@@ -57,12 +57,22 @@ class Notifier:
             self._sys_notify(f"发现 {len(pending)} 个待确认异常，请打开管理页面处理")
 
     def pending(self):
-        rows = self.db.q("SELECT a.*, r.report_path AS report_path FROM alerts a "
+        from .correlate import alert_time_of
+        rows = self.db.q("SELECT a.*, r.report_path AS report_path, r.source_text AS run_text "
+                         "FROM alerts a "
                          "LEFT JOIN runs r ON a.run_id=r.run_id "
                          "WHERE a.status='pending' AND "
                          "(r.trigger_type IS NULL OR r.trigger_type != 'simulate') "
                          "ORDER BY a.severity, a.created_at")
-        return [dict(r) for r in rows]
+        # 与报警中心一致：预警时间超过 2 小时的老告警不再提醒（dws 延迟回填产物）
+        cutoff = (datetime.now().astimezone() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        out = []
+        for r in rows:
+            at = alert_time_of(r["run_text"] or "")
+            if at and at + ":00" < cutoff:
+                continue
+            out.append(dict(r))
+        return out
 
     def ack(self, alert_id):
         self.db.update("alerts", "alert_id", alert_id, status="acked", acked_at=now())

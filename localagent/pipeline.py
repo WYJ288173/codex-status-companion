@@ -57,6 +57,22 @@ class Pipeline:
                     db.audit("dingtalk", "broadcast_skipped_other_owner", msg["group"],
                              "", None)
                     return {"handled": False, "reason": "broadcast_owner_not_me"}
+            # 新鲜度守卫：dws 会延迟回填数小时~数天前的老消息，
+            # 预警时间超过 2 小时的老消息只记录不分析，避免老报警反复占据页面
+            _at = correlate.alert_time_of(msg["text"])
+            if _at:
+                from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+                _cutoff = (_dt.now(_tz(_td(hours=8))) - _td(hours=2)).strftime("%Y-%m-%d %H:%M")
+                if _at[:16] < _cutoff:
+                    db.insert("messages", ignore=True, msg_id=msg["msg_id"],
+                              group_name=msg["group"], sender=msg["sender"],
+                              received_at=now(), msg_time=msg.get("msg_time") or None,
+                              matched_entry_id=entry["id"],
+                              matched_rule="stale_backfill", run_id=None,
+                              source_text=msg["text"])
+                    db.audit("dingtalk", "msg_skipped_stale", msg["group"],
+                             f"预警时间 {_at[:16]} 早于2小时窗口", None)
+                    return {"handled": False, "reason": "stale_backfill"}
             cd_key = f"{msg['group']}:{(parsed or {}).get('app') or ''}"
             if self.cooldowns.hit(cd_key):
                 db.insert("messages", ignore=True, msg_id=msg["msg_id"],

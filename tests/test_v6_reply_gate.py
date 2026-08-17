@@ -237,8 +237,8 @@ else:
 check("卡片展示告警原文时间+采集时间", "alert_time_of" in src and "采集 {recv_t}" in src)
 
 from localagent.webapp import alert_time_of
-check("告警时间解析（横杠格式）", alert_time_of("2026-08-17 08:50 xx报警") == "08-17 08:50")
-check("告警时间解析（斜杠格式）", alert_time_of("2026/08/17 09:49\n发布") == "08-17 09:49")
+check("告警时间解析（横杠格式）", alert_time_of("2026-08-17 08:50 xx报警") == "2026-08-17 08:50")
+check("告警时间解析（斜杠格式）", alert_time_of("2026/08/17 09:49\n发布") == "2026-08-17 09:49")
 check("无时间戳回退空串", alert_time_of("无时间文本") == "")
 
 # ---------- 7. 归类兜底（Sunfire 噪音卡片无家族关键词） ----------
@@ -257,10 +257,20 @@ dbsrc = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "db.py"
              encoding="utf-8").read()
 check("采集钉群消息 createTime", '"msg_time": m.get("createTime")' in dingsrc)
 check("messages 表 msg_time 迁移", "ALTER TABLE messages ADD COLUMN msg_time" in dbsrc)
-check("卡片主时间优先 msg_time", "mt[5:16] if len(mt) >= 16" in src)
-check("消息窗口按有效消息时间过滤（msg_time→正文时间→采集时间，防延迟回填老消息）",
-      "def _eff_time" in src and "alert_time_of(m[\"source_text\"])" in src
-      and "rows_win.sort(key=_eff_time, reverse=True)" in src)
+check("预警时间解析优先正文「预警时间」字段",
+      "预警时间[:：]" in open(os.path.join(os.path.dirname(__file__), "..", "localagent",
+                                          "correlate.py"), encoding="utf-8").read())
+check("预警时间字段优先于正文首个时间戳",
+      corrmod.alert_time_of("噪音提示 2026-08-17 09:00 预警时间: 2026/08/17 08:50") == "2026-08-17 08:50")
+check("卡片主时间优先预警时间", "预警 {a_ts[5:]}" in src)
+check("告警表按预警时间过滤窗口", 'eff = (at + ":00") if at else' in src)
+check("老消息新鲜度守卫（预警时间超2小时只记录不分析）",
+      "stale_backfill" in open(os.path.join(os.path.dirname(__file__), "..", "localagent",
+                                            "pipeline.py"), encoding="utf-8").read())
+check("待确认提醒按预警时间过滤",
+      'alert_time_of(r["run_text"]' in open(os.path.join(os.path.dirname(__file__), "..",
+                                                          "localagent", "notify.py"),
+                                             encoding="utf-8").read())
 
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",

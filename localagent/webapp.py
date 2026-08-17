@@ -35,16 +35,7 @@ input,select{background:#0f1417;color:#e6edf3;border:1px solid #22303a;border-ra
 
 TEST_FILTER = "(r.trigger_type IS NULL OR r.trigger_type != 'simulate')"
 
-# 报警原文内嵌的告警时间（如 2026-08-17 08:50 / 2026/08/17 08:50），与钉群展示时间对应
-ALERT_TS_RE = re.compile(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})")
-
-
-def alert_time_of(text):
-    tm = ALERT_TS_RE.search(text or "")
-    if not tm:
-        return ""
-    return (f"{int(tm.group(2)):02d}-{int(tm.group(3)):02d} "
-            f"{int(tm.group(4)):02d}:{tm.group(5)}")
+from .correlate import alert_time_of  # noqa: E402  预警时间解析（优先正文字段）
 
 
 def build_app(app_ctx):
@@ -277,6 +268,7 @@ def build_app(app_ctx):
                   "yesterday": _d0 - timedelta(days=1),
                   "3d": datetime.now(CST) - timedelta(days=3)}[range]
         cutoff = cutoff.isoformat(timespec="seconds")
+        cutoff_cmp = cutoff[:19].replace("T", " ")
         range_label = {"2h": "最近2小时", "today": "今天", "yesterday": "昨天起", "3d": "近3天"}[range]
 
         def sol_codes_for(a):
@@ -306,19 +298,27 @@ def build_app(app_ctx):
             return matched
 
         def rows(status):
-            sql = ("SELECT a.*, r.report_path AS report_path, r.trigger_type AS trigger_type "
+            # SQL 放宽到 3 天（分析时间可能晚于预警时间很久），再按预警时间在 Python 层过滤
+            wide = (datetime.now(CST) - timedelta(days=3)).isoformat(timespec="seconds")
+            sql = ("SELECT a.*, r.report_path AS report_path, r.trigger_type AS trigger_type, "
+                   "r.source_text AS run_text "
                    "FROM alerts a LEFT JOIN runs r ON a.run_id=r.run_id "
                    f"WHERE a.status=? AND a.created_at >= ? AND ({TEST_FILTER} OR ?)")
-            args = [status, cutoff, show_test]
+            args = [status, wide, show_test]
             if sev:
                 sql += " AND a.severity=?"; args.append(sev)
             if kw:
                 sql += " AND a.summary LIKE ?"; args.append(f"%{kw}%")
             if f_group:
                 sql += " AND a.source_group LIKE ?"; args.append(f"%{f_group}%")
-            rs = db.q(sql + " ORDER BY a.created_at DESC LIMIT 100", *args)
+            rs = db.q(sql + " ORDER BY a.created_at DESC LIMIT 300", *args)
             out = ""
             for a in rs:
+                at = alert_time_of(a["run_text"] or "")
+                # 窗口按预警时间（正文「预警时间」字段）校验；解析不到回退分析时间
+                eff = (at + ":00") if at else (a["created_at"] or "")[:19].replace("T", " ")
+                if eff < cutoff_cmp:
+                    continue
                 link = (f"<a style='color:#7ee7b0' href='/reports/view?"
                         f"p={a['report_path']}'>报告</a>" if a["report_path"] else "-")
                 btns = ""
@@ -332,8 +332,10 @@ def build_app(app_ctx):
                     btns += (f" <button onclick=\"trigSol('{a['alert_id']}','{c}',"
                              f"{json.dumps(req)})\">触发方案</button>")
                 tag = " <span class='warn'>[测试]</span>" if a["trigger_type"] == "simulate" else ""
+                time_cell = (f"<span title='报警发送时间（正文预警时间）'>{at[5:]}</span>"
+                             if at else f"<span title='无预警时间，显示分析时间'>{a['created_at'][11:19]}</span>")
                 out += (f"<tr>{chk}<td>{a['severity']}</td><td>{a['summary']}{tag}</td><td>{a['source_group']}</td>"
-                        f"<td>{a['created_at'][11:19]}</td><td>{link}</td><td>{a['status']}</td><td>{btns}</td></tr>")
+                        f"<td>{time_cell}</td><td>{link}</td><td>{a['status']}</td><td>{btns}</td></tr>")
             return out
         body = """<script>
 function act(id,op){fetch('/alerts/'+id+'/'+op,{method:'POST'}).then(r=>{if(!r.ok)throw new Error(r.status);location.reload()}).catch(e=>alert('操作失败（服务可能正在重启），请稍后刷新重试：'+e))}
@@ -443,10 +445,9 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                  f"{'监听处理所有告警消息' if listen_all else '仅处理@我的消息'}"
                  f"（<a style='color:#7ee7b0' href='/groups'>配置</a>）</p>")
         # 消息清单（与报警共用统一时间窗口，20 条/页分页，卡片化展示）
-        # 窗口按「有效消息时间」过滤/排序：msg_time（钉群时间）→ 正文告警时间 → 采集时间，
-        # 与钉群所见一致，避免 dws 延迟回填的老消息占据近期窗口
+        # 窗口按「预警时间」（正文「预警时间」字段，即报警发送时间）过滤/排序，
+        # 回退钉群消息时间 msg_time、采集时间；避免 dws 延迟回填的老消息占据近期窗口
         from . import render as rdr
-        cutoff_cmp = cutoff[:19].replace("T", " ")
         msg_sql = ("SELECT m.*, r.status AS run_status, r.report_path AS report_path "
                    "FROM messages m LEFT JOIN runs r ON m.run_id=r.run_id "
                    "WHERE REPLACE(substr(m.received_at,1,19),'T',' ') >= ?")
@@ -459,12 +460,12 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
             msg_sql += " AND m.source_text LIKE ?"; msg_args.append(f"%{kw}%")
 
         def _eff_time(m):
+            at = alert_time_of(m["source_text"])
+            if at:
+                return at + ":00"
             mt = (m["msg_time"] or "").strip().replace("T", " ")
             if len(mt) >= 16:
                 return mt
-            at = alert_time_of(m["source_text"])
-            if at:
-                return f"{datetime.now(CST).year}-{at}"
             return (m["received_at"] or "")[:19].replace("T", " ")
 
         rows_win = [r for r in db.q(msg_sql, *msg_args) if _eff_time(r) >= cutoff_cmp]
@@ -550,13 +551,18 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                 anchor = "reply_first" if not reply_anchor["done"] else ""
                 reply_anchor["done"] = True
                 reply_block = reply_html(pending_reply_map[m["run_id"]], anchor)
-            a_ts = alert_time_of(m.get("source_text"))
+            a_ts = alert_time_of(m.get("source_text"))  # YYYY-MM-DD HH:MM（正文「预警时间」）
             recv_t = (m.get('received_at') or '')[5:16].replace('T', ' ')
             mt = (m.get('msg_time') or '').strip()
-            # 主时间优先用钉群消息自带 createTime（与钉群展示一致），
-            # 旧数据无该字段时回退正文告警时间，再回退采集时间
-            main_t = mt[5:16] if len(mt) >= 16 else (a_ts or recv_t)
-            time_cell = (f"<span>{main_t}</span> <span style='color:#9fb3c0;font-size:11px' "
+            # 主时间=预警时间（报警发送时间），回退钉群消息时间、采集时间
+            if a_ts:
+                main_t = f"<span title='报警发送时间（正文预警时间）'>预警 {a_ts[5:]}</span>"
+            elif len(mt) >= 16:
+                main_t = f"<span title='钉群消息时间'>{mt[5:16]}</span>"
+            else:
+                main_t = f"<span title='LocalAgent 采集时间'>{recv_t}</span>"
+            time_cell = (f"<span style='color:#e6edf3'>{main_t}</span> "
+                         f"<span style='color:#9fb3c0;font-size:11px' "
                          f"title='LocalAgent 采集到该消息的时间'>采集 {recv_t}</span>"
                          if main_t else f"<span style='color:#9fb3c0'>{recv_t}</span>")
             msg_out += (
@@ -617,7 +623,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                  "<p><button onclick=\"bulk('ack')\">批量确认</button> "
                  "<button class='gray' onclick=\"bulk('ignore')\">批量忽略</button> "
                  "<label style='font-size:12px;color:#9fb3c0'><input type='checkbox' onclick=\"document.querySelectorAll('.sel').forEach(c=>c.checked=this.checked)\"> 全选</label></p>"
-                 "<table><tr><th></th><th>级别</th><th>摘要</th><th>来源</th><th>时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
+                 "<table><tr><th></th><th>级别</th><th>摘要</th><th>来源</th><th>预警时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
                  + (pend or "<tr><td colspan=8>无</td></tr>") + "</table></div>")
         body += ("<div class='card'><h2>钉群消息清单"
                  f"（{range_label}共 {total_msg} 条，每页 {PAGE_SZ} 条）</h2>"
@@ -625,7 +631,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                  + (msg_out or "<p style='color:#9fb3c0'>无消息</p>")
                  + (orphan_html or "")
                  + "<p style='font-size:12px'>" + "　".join(nav) + "</p></div>")
-        th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
+        th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>预警时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
         has_filter = bool(sev or kw or f_group or f_rule)
         hist = ""
         for title, st in (("无问题标注", "no_problem"), ("已确认", "acked"),

@@ -66,7 +66,7 @@ check("策略含异常深挖与代码级根因条款",
       and "代码未定位" in engine.PROMPT_TEMPLATE)
 
 # ---------- 2. 钉群 Markdown 降噪 ----------
-RAW = ("### 改签履约-审计汇总-告警定时播报2026-08-07 10:30\n\n"
+RAW = ("### 改签履约-审计汇总-告警定时播报" + now()[:16].replace("T", " ") + "\n\n"
        "**今日未完结:2个**\n\n-----\n\n"
        "**1.<font color=#FF0000 >【高危场景】</font>【BCP】"
        "[国际改签状态流转基础信息审计(TRP_INTER_MODIFY_STATUS_ADUIT)]"

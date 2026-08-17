@@ -5,6 +5,25 @@ from datetime import datetime, timedelta
 
 ORDER_RE = re.compile(r"(?<!\d)(\d{10,20})(?!\d)")
 
+# 告警时间解析：优先正文「预警时间」字段（Sunfire 卡片标准字段，即报警发送时间），
+# 回退正文第一个时间戳。返回 "YYYY-MM-DD HH:MM"，解析不到返回 ""
+ALERT_TS_RE = re.compile(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})")
+ALERT_FIELD_RE = re.compile(r"预警时间[:：]\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2}[ T]\d{1,2}:\d{2})")
+
+
+def alert_time_of(text):
+    t = text or ""
+    m = ALERT_FIELD_RE.search(t)
+    raw = m.group(1) if m else None
+    if not raw:
+        m2 = ALERT_TS_RE.search(t)
+        if not m2:
+            return ""
+        raw = m2.group(0)
+    m3 = ALERT_TS_RE.search(raw)
+    return (f"{m3.group(1)}-{int(m3.group(2)):02d}-{int(m3.group(3)):02d} "
+            f"{int(m3.group(4)):02d}:{m3.group(5)}")
+
 # 同类归组家族：验价失败/验价成功率下跌/验价失败量上升等同关键词报警归为一类
 FAMILIES = ("验价", "询价", "验座", "预订", "生单", "支付", "出票", "退款", "改签超时")
 

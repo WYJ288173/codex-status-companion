@@ -101,12 +101,15 @@ async def main():
     check("H1 报告落盘", len(reps) >= 2 and os.path.exists(os.path.join(app.cfg.workspace, reps[0]["file_path"])))
 
     # 场景 S：审计播报处理模式 + 方案门禁
-    BROADCAST = ("### 改签履约-审计汇总-告警定时播报2026-08-07 10:30\n\n"
+    from datetime import datetime, timedelta, timezone
+    _fresh = (datetime.now(timezone(timedelta(hours=8))) - timedelta(minutes=5)
+              ).strftime("%Y-%m-%d %H:%M")
+    BROADCAST = ("### 改签履约-审计汇总-告警定时播报" + _fresh + "\n\n"
                  "**今日未完结:2个，其中**待接手2;待反馈0;逾期0 \n\n-----\n\n"
                  "**1.<font color=#FF0000 >【高危场景】</font>【BCP】【交通】"
                  "[国际改签状态流转基础信息审计(TRP_INTER_MODIFY_STATUS_ADUIT)]"
                  "(http://bcp.alibaba-inc.com/rules/errorlist?ruleCode=TRP_INTER_MODIFY_STATUS_ADUIT)**\n\n"
-                 "**告警时间:** 2026-08-07 05:25:08\n\n**规则owner:** @华扬")
+                 "**告警时间:** " + _fresh + ":08\n\n**规则owner:** @华扬")
     runs_before = db.one("SELECT COUNT(*) c FROM runs")["c"]
     # S1：全局静默（listen_all=false）时，非@我消息不处理、不入库、不展示
     _ad = _y.safe_load(open(ap)); _ad["dingtalk"]["listen_all"] = False
