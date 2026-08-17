@@ -65,6 +65,10 @@ class DB:
             self.conn.execute("ALTER TABLE messages ADD COLUMN parsed_json TEXT")
         except Exception:
             pass
+        try:
+            self.conn.execute("ALTER TABLE messages ADD COLUMN msg_time TEXT")
+        except Exception:
+            pass
         for idx, sql in [
             ("idx_runs_started", "CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at)"),
             ("idx_alerts_created", "CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at)"),

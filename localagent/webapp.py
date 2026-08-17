@@ -537,9 +537,13 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                 reply_block = reply_html(pending_reply_map[m["run_id"]], anchor)
             a_ts = alert_time_of(m.get("source_text"))
             recv_t = (m.get('received_at') or '')[5:16].replace('T', ' ')
-            time_cell = (f"<span>{a_ts}</span> <span style='color:#9fb3c0;font-size:11px' "
+            mt = (m.get('msg_time') or '').strip()
+            # 主时间优先用钉群消息自带 createTime（与钉群展示一致），
+            # 旧数据无该字段时回退正文告警时间，再回退采集时间
+            main_t = mt[5:16] if len(mt) >= 16 else (a_ts or recv_t)
+            time_cell = (f"<span>{main_t}</span> <span style='color:#9fb3c0;font-size:11px' "
                          f"title='LocalAgent 采集到该消息的时间'>采集 {recv_t}</span>"
-                         if a_ts else f"<span style='color:#9fb3c0'>{recv_t}</span>")
+                         if main_t else f"<span style='color:#9fb3c0'>{recv_t}</span>")
             msg_out += (
                 "<div style='border:1px solid #22303a;border-radius:8px;padding:10px;margin-bottom:8px;"
                 "background:#0f1417'>"

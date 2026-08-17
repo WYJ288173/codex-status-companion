@@ -107,6 +107,7 @@ class DwsDingTalk:
                "group": group,
                "sender": m.get("sender") or "unknown",
                "text": m.get("content") or "",
+               "msg_time": m.get("createTime") or "",
                "at_me": at_me}
         if not msg["msg_id"] or self.db.one("SELECT 1 FROM messages WHERE msg_id=?", msg["msg_id"]):
             return False

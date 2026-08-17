@@ -50,7 +50,8 @@ class Pipeline:
                 if owner_name not in msg["text"]:
                     db.insert("messages", ignore=True, msg_id=msg["msg_id"],
                               group_name=msg["group"], sender=msg["sender"],
-                              received_at=now(), matched_entry_id=entry["id"],
+                              received_at=now(), msg_time=msg.get("msg_time") or None,
+                              matched_entry_id=entry["id"],
                               matched_rule="broadcast_not_my_owner", run_id=None,
                               source_text=msg["text"])
                     db.audit("dingtalk", "broadcast_skipped_other_owner", msg["group"],
@@ -60,7 +61,8 @@ class Pipeline:
             if self.cooldowns.hit(cd_key):
                 db.insert("messages", ignore=True, msg_id=msg["msg_id"],
                           group_name=msg["group"], sender=msg["sender"],
-                          received_at=now(), matched_entry_id=entry["id"],
+                          received_at=now(), msg_time=msg.get("msg_time") or None,
+                          matched_entry_id=entry["id"],
                           matched_rule="cooldown", run_id=None, source_text=msg["text"])
                 return {"handled": False, "reason": "cooldown"}
         elif msg["at_me"]:
@@ -76,6 +78,7 @@ class Pipeline:
                 self.db.audit("dingtalk", "at_me_unrecognized", msg["group"], msg["text"][:80])
                 db.insert("messages", ignore=True, msg_id=msg["msg_id"], group_name=msg["group"],
                           sender=msg["sender"], received_at=now(),
+                          msg_time=msg.get("msg_time") or None,
                           matched_entry_id=entry["id"], matched_rule="unrecognized", run_id=None,
                           source_text=msg["text"])
                 return {"handled": False, "reason": "at_me_unrecognized"}
@@ -84,7 +87,8 @@ class Pipeline:
             if self.cooldowns.hit(f"{msg['group']}:atme"):
                 db.insert("messages", ignore=True, msg_id=msg["msg_id"],
                           group_name=msg["group"], sender=msg["sender"],
-                          received_at=now(), matched_entry_id=entry["id"],
+                          received_at=now(), msg_time=msg.get("msg_time") or None,
+                          matched_entry_id=entry["id"],
                           matched_rule="cooldown", run_id=None, source_text=msg["text"])
                 return {"handled": False, "reason": "cooldown"}
         else:
@@ -102,6 +106,7 @@ class Pipeline:
                   source_text=msg["text"])
         db.insert("messages", ignore=True, msg_id=msg["msg_id"], group_name=msg["group"],
                   sender=msg["sender"], received_at=now(),
+                  msg_time=msg.get("msg_time") or None,
                   matched_entry_id=entry["id"], matched_rule=rule_hit, run_id=run_id,
                   source_text=msg["text"], parsed_json=audit_json)
         db.audit("dingtalk", "msg_matched", msg["group"], rule_hit, run_id)

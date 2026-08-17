@@ -250,6 +250,15 @@ check("offer 生单指标兜底归类为生单",
 check("正文含家族词时优先正文（不走兜底）",
       corrmod.family_key("验价失败 订单1234567890123") == "kw:验价")
 
+# ---------- 8. 卡片时间与钉群对齐（msg_time 优先） ----------
+dingsrc = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "dingtalk.py"),
+               encoding="utf-8").read()
+dbsrc = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "db.py"),
+             encoding="utf-8").read()
+check("采集钉群消息 createTime", '"msg_time": m.get("createTime")' in dingsrc)
+check("messages 表 msg_time 迁移", "ALTER TABLE messages ADD COLUMN msg_time" in dbsrc)
+check("卡片主时间优先 msg_time", "mt[5:16] if len(mt) >= 16" in src)
+
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",
       "<div id=\"modal\">" not in petsrc and "id='mlist'" not in petsrc
