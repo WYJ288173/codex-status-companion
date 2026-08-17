@@ -478,7 +478,8 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                     f"{rows}</table></div>")
 
         _st_style = {"success": ("#7ee7b0", "✓ 已分析"), "failed": ("#f87171", "✗ 分析失败"),
-                     "running": ("#f59e0b", "… 分析中")}
+                     "running": ("#f59e0b", "… 分析中"),
+                     "engine_unavailable": ("#f59e0b", "⚠ 引擎不可用")}
         _rule_style = {"cooldown": "跳过(冷却)", "unrecognized": "未识别", "no_match": "未匹配",
                        "broadcast_record_only": "记录不分析(仅@我)"}
         msg_out = ""
@@ -500,6 +501,9 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                 rp = m.get("report_path")
                 st_tag = (f"<a style='color:{color}' href='/reports/view?p={_esc(rp)}'>{label} · 报告</a>"
                           if rp else f"<span style='color:{color}'>{label}</span>")
+                if m.get("run_status") in ("failed", "engine_unavailable"):
+                    st_tag += (f" <button class='gray' style='font-size:11px;padding:1px 8px' "
+                               f"onclick=\"reanalyze('{_esc(m['run_id'])}')\">重新分析</button>")
             else:
                 st_tag = (f"<span style='color:#9fb3c0'>"
                           f"{_rule_style.get(m.get('matched_rule') or '', '未分析')}</span>")
@@ -1503,8 +1507,12 @@ const r=await fetch('/api/storage/'+op,{{method:'POST'}});const j=await r.json()
 
     @app.get("/api/state")
     def api_state():
+        has_running = db.one("SELECT 1 FROM runs WHERE status='running' LIMIT 1") is not None
+        status = ("working" if has_running
+                  else "attention" if app_ctx.notifier.pending()
+                  else db.get_state("agent_status", "idle"))
         return {
-            "status": "attention" if app_ctx.notifier.pending() else db.get_state("agent_status", "idle"),
+            "status": status,
             "pending": app_ctx.notifier.pending(),
             "toast": db.get_state("pet_toast", ""),
             "toast_ts": db.get_state("pet_toast_ts", ""),

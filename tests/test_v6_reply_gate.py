@@ -190,5 +190,9 @@ check("groups 页已移除全类型放行", "全类型放行" not in src)
 check("groups 页已移除 prompt 式设置", "gsetTypes" not in src)
 check("端点 send_reply 异常兜底", "send_reply_error" in src)
 check("卡片展示 alert_type 徽标", "pl.get('alert_type')" in src)
+check("失败/引擎不可用卡片带重新分析按钮",
+      'in ("failed", "engine_unavailable")' in src and "重新分析</button>" in src)
+check("api_state 按 running 推导 working",
+      "WHERE status='running' LIMIT 1" in src and '"working" if has_running' in src)
 
 print(f"\n全部 {len(PASS)} 项断言通过")
