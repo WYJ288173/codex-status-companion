@@ -341,15 +341,15 @@ def build_app(app_ctx):
                              f"{json.dumps(req)})\">触发方案</button>")
                 tag = " <span class='warn'>[测试]</span>" if a["trigger_type"] == "simulate" else ""
                 collected = (a["collected_at"] or "")[5:16].replace("T", " ")
-                if at:
-                    time_cell = (f"<span title='报警发送时间（正文预警时间）'>{at[5:]}</span>"
-                                 + (f"<br><span style='color:#9fb3c0;font-size:11px' "
-                                    f"title='LocalAgent 采集到该消息的时间'>采集 {collected}</span>"
-                                    if collected else ""))
-                else:
-                    time_cell = f"<span title='无预警时间，显示分析时间'>{a['created_at'][11:19]}</span>"
+                alert_cell = (f"<span title='报警发送时间（正文预警时间）'>{at[5:]}</span>"
+                              if at else f"<span title='无预警时间，显示分析时间'>{a['created_at'][11:19]}</span>")
+                collected_cell = (f"<span style='color:#9fb3c0' title='LocalAgent 采集到该消息的时间'>{collected}</span>"
+                                  if collected else "-")
+                status_cn = {"pending": "待确认", "acked": "已确认", "ignored": "已忽略",
+                             "no_problem": "无问题", "reanalyzed": "已重新分析"}.get(a["status"], a["status"])
                 out += (f"<tr>{chk}<td>{a['severity']}</td><td>{a['summary']}{tag}</td><td>{a['source_group']}</td>"
-                        f"<td>{time_cell}</td><td>{link}</td><td>{a['status']}</td><td>{btns}</td></tr>")
+                        f"<td>{alert_cell}</td><td>{collected_cell}</td><td>{link}</td>"
+                        f"<td>{status_cn}</td><td>{btns}</td></tr>")
             return out
         body = """<script>
 function act(id,op){fetch('/alerts/'+id+'/'+op,{method:'POST'}).then(r=>{if(!r.ok)throw new Error(r.status);location.reload()}).catch(e=>alert('操作失败（服务可能正在重启），请稍后刷新重试：'+e))}
@@ -560,6 +560,13 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                     st_tag += (f" <button id='ra_{_esc(m['run_id'])}' class='gray' "
                                f"style='font-size:11px;padding:1px 8px' "
                                f"onclick=\"retryFailed('{_esc(m['run_id'])}')\">重新分析</button>")
+                # 已分析且有待回复：报告链接后直接给「回复到钉群/丢弃」，不再用独立待回复块
+                pr = pending_reply_map.get(m["run_id"])
+                if pr:
+                    st_tag += (f" <button style='font-size:11px;padding:1px 8px' "
+                               f"onclick=\"sendReply({pr['id']})\">回复到钉群</button> "
+                               f"<button class='red' style='font-size:11px;padding:1px 8px' "
+                               f"onclick=\"rejectReply({pr['id']})\">丢弃</button>")
             else:
                 st_tag = (f"<span style='color:#9fb3c0'>"
                           f"{_rule_style.get(m.get('matched_rule') or '', '未分析')}</span>")
@@ -567,10 +574,8 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
             body_html = _broadcast_card(parsed) if parsed else (
                 f"<div style='margin-top:6px;font-size:13px;color:#e6edf3;white-space:pre-wrap'>"
                 f"{_esc(clean[:180])}{'…' if len(clean) > 180 else ''}</div>")
-            reply_actions = ""
             card_border = "border:1px solid #22303a"
             if m.get("run_id") and m["run_id"] in pending_reply_map:
-                reply_actions = reply_actions_html(pending_reply_map[m["run_id"]])
                 card_border = "border:1px solid #f59e0b;border-left:4px solid #f59e0b"
             a_ts = alert_time_of(m.get("source_text"))  # YYYY-MM-DD HH:MM（正文「预警时间」）
             recv_t = (m.get('received_at') or '')[5:16].replace('T', ' ')
@@ -595,7 +600,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                 f"{_esc(m.get('group_name'))}</span>"
                 f"<span style='color:#9fb3c0'>{_esc(m.get('sender'))}</span>{chips}"
                 f"<span style='margin-left:auto'>{st_tag}</span></div>"
-                f"{body_html}{reply_actions}"
+                f"{body_html}"
                 f"<details style='margin-top:6px'><summary style='cursor:pointer;color:#9fb3c0;"
                 f"font-size:11px'>原始全文</summary><pre style='font-size:11px'>"
                 f"{_esc(m.get('source_text'))}</pre></details></div>")
@@ -646,21 +651,21 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                  "<p><button onclick=\"bulk('ack')\">批量确认</button> "
                  "<button class='gray' onclick=\"bulk('ignore')\">批量忽略</button> "
                  "<label style='font-size:12px;color:#9fb3c0'><input type='checkbox' onclick=\"document.querySelectorAll('.sel').forEach(c=>c.checked=this.checked)\"> 全选</label></p>"
-                 "<table><tr><th></th><th>级别</th><th>摘要</th><th>来源</th><th>预警/采集时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
-                 + (pend or "<tr><td colspan=8>无</td></tr>") + "</table></div>")
+                 "<table><tr><th></th><th>级别</th><th>摘要</th><th>来源</th><th>预警时间</th><th>采集时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
+                 + (pend or "<tr><td colspan=9>无</td></tr>") + "</table></div>")
         body += ("<div class='card'><h2>钉群消息清单"
                  f"（{range_label}共 {total_msg} 条，每页 {PAGE_SZ} 条）</h2>"
                  f"<p style='font-size:12px'>{range_links}</p>"
                  + (orphan_html or "")
                  + (msg_out or "<p style='color:#9fb3c0'>无消息</p>")
                  + "<p style='font-size:12px'>" + "　".join(nav) + "</p></div>")
-        th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>预警/采集时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
+        th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>预警时间</th><th>采集时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
         has_filter = bool(sev or kw or f_group or f_rule)
         hist = ""
         for title, st in (("无问题标注", "no_problem"), ("已确认", "acked"),
                           ("已忽略", "ignored"), ("已重新分析", "reanalyzed")):
             r_out = rows(st)
-            hist += f"<h3>{title}</h3><table>{th}" + (r_out or "<tr><td colspan=7>无</td></tr>") + "</table>"
+            hist += f"<h3>{title}</h3><table>{th}" + (r_out or "<tr><td colspan=8>无</td></tr>") + "</table>"
         body += (f"<details {'open' if has_filter else ''} style='margin:12px 0'>"
                  f"<summary style='cursor:pointer;color:#9fb3c0'>历史状态记录"
                  f"（无问题标注 / 已确认 / 已忽略 / 已重新分析）</summary>{hist}</details>")

@@ -341,15 +341,20 @@ check("手动发送不确定结论需二次确认", "仍要发送？" in src and
 check("重新分析后消息 run_id 指向新 run",
       "UPDATE messages SET run_id=? WHERE run_id=?" in src)
 check("重新分析成功立即切分析中", "markRunning" in src and "… 分析中" in src)
-check("回复操作内聚卡片（无独立 reply_block）",
+check("孤儿待回复保留操作块、独立虚线块已移除",
       "reply_actions_html" in src and "reply-block" not in src)
 check("孤儿待回复移到消息清单顶部",
       "待回复（无对应消息" in src and "reply_first" not in src)
 check("待回复卡片橙色边标识", "border-left:4px solid #f59e0b" in src)
 check("待确认行操作栏有回复到钉群按钮", "pr_by_run" in src and "回复到钉群" in src)
 check("确认按钮与回复按钮分离", ">确认</button>" in src and ">回复到钉群</button>" in src)
-check("时间列含采集时间", "collected_at" in src and "采集 {collected}" in src)
-check("表头改为预警/采集时间", "预警/采集时间" in src)
+check("消息卡片报告链接后内联回复按钮",
+      "pending_reply_map.get(m[\"run_id\"])" in src and "回复到钉群</button>" in src)
+check("消息卡片不再用独立待回复块",
+      "reply_actions_html(pending_reply_map[m[\"run_id\"]])" not in src)
+check("时间拆为预警/采集两列", "alert_cell" in src and "collected_cell" in src
+      and "预警时间</th><th>采集时间</th>" in src)
+check("状态列中文化", '"pending": "待确认"' in src and '"no_problem": "无问题"' in src)
 
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",
