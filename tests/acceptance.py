@@ -26,6 +26,7 @@ async def main():
     ap = os.path.join(ws, "config", "agent.yaml")
     _ad = _y.safe_load(open(ap)) or {}
     _ad.setdefault("dingtalk", {})["listen_all"] = True
+    _ad.setdefault("notify", {})["aggregate_minutes"] = 0
     _y.safe_dump(_ad, open(ap, "w"), allow_unicode=True, sort_keys=False)
     # 测试自洽：强制方案门禁关闭（workspace 可能因真实使用遗留为开启），S3 再显式打开
     from localagent import solutions as _solmod

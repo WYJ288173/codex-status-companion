@@ -40,6 +40,7 @@ notify:
   ignore_cooldown_hours: 4
   reply_rate_per_minute: 3
   cooldown_seconds: 0
+  aggregate_minutes: 5
 web:
   host: 127.0.0.1
   port: 8765

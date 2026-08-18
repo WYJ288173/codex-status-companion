@@ -46,7 +46,7 @@ def bootstrap():
     ding = build_ding(cfg, db)
     pipeline = Pipeline(cfg, db, notifier, ding)
     if hasattr(ding, "on_message"):
-        ding.on_message = pipeline.process
+        ding.on_message = pipeline.enqueue
     APP.ding, APP.pipeline = ding, pipeline
     return APP
 
@@ -94,6 +94,7 @@ async def run():
 
     asyncio.create_task(app.notifier.reopen_loop())
     asyncio.create_task(_periodic_cleanup())
+    asyncio.create_task(app.pipeline.worker_loop())
     if not app.cfg.mock and app.cfg.engines.get("probe_on_start", True):
         asyncio.create_task(_probe_engines())
     await app.ding.start()

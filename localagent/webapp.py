@@ -1659,7 +1659,8 @@ const r=await fetch('/api/storage/'+op,{{method:'POST'}});const j=await r.json()
         import uuid
         msg = {"msg_id": data.get("msg_id") or f"sim-{uuid.uuid4().hex[:8]}",
                "group": data["group"], "sender": data.get("sender", "tester"),
-               "text": data["text"], "at_me": data.get("at_me", False)}
+               "text": data["text"], "at_me": data.get("at_me", False),
+               "no_aggregate": True}
         result = await app_ctx.pipeline.process(msg)
         if result.get("run_id") and msg["msg_id"].startswith("sim-"):
             db.update("runs", "run_id", result["run_id"], trigger_type="simulate")

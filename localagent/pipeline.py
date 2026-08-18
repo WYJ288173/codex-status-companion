@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from . import authlist, correlate, engine, reports
@@ -20,6 +21,55 @@ class Pipeline:
         self.notifier = notifier
         self.ding = ding
         self.cooldowns = Cooldowns(int(cfg.notify.get("cooldown_seconds", 300)))
+        self.queue = None
+        self._batches = {}
+
+    def _agg_minutes(self):
+        """同群报警聚合窗口（分钟）；mock 模式默认 0（即时分析），显式配置优先。"""
+        default = 0 if getattr(self.cfg, "mock", False) else 5
+        return int(self.cfg.notify.get("aggregate_minutes", default))
+
+    async def enqueue(self, msg):
+        """轮询入口：只入队不分析，采集循环永不被引擎阻塞。"""
+        if self.queue is None:
+            self.queue = asyncio.Queue()
+        await self.queue.put(msg)
+
+    async def worker_loop(self):
+        """串行消费队列：普通消息走 process，flush 标记触发聚合批分析。"""
+        if self.queue is None:
+            self.queue = asyncio.Queue()
+        while True:
+            msg = await self.queue.get()
+            try:
+                if isinstance(msg, dict) and msg.get("__flush__"):
+                    await self._flush(msg["__flush__"])
+                else:
+                    await self.process(msg)
+            except Exception as e:
+                self.db.audit("task", "process_error",
+                              str((msg or {}).get("group", ""))[:50], str(e)[:200])
+
+    async def _schedule_flush(self, group, agg_min):
+        """聚合窗口到期后触发批分析；有 worker 时经队列串行，避免并发跑引擎。"""
+        if self.queue is None:
+            async def _direct():
+                await asyncio.sleep(agg_min * 60)
+                await self._flush(group)
+            asyncio.ensure_future(_direct())
+            return
+        queue = self.queue
+
+        async def _later():
+            await asyncio.sleep(agg_min * 60)
+            await queue.put({"__flush__": group})
+        asyncio.ensure_future(_later())
+
+    async def _flush(self, group):
+        b = self._batches.pop(group, None)
+        if not b or not b["items"]:
+            return
+        await self._analyze_items(b["items"])
 
     def _effective_process_mode(self, group_name):
         """群级 process_mode 覆盖 > agent.yaml dingtalk.process_mode（默认 at_me_only）。"""
@@ -124,7 +174,8 @@ class Pipeline:
                                      f"同家族 {_fam} 预警时间 {_at} 已分析", None)
                             return {"handled": False, "reason": "duplicate_alert"}
             cd_key = f"{msg['group']}:{(parsed or {}).get('app') or ''}"
-            if self.cooldowns.hit(cd_key):
+            # 聚合窗口开启时 cooldown 在开批时判定（见下），窗口内报警进批不丢弃
+            if not (self._agg_minutes() > 0 and not audit_parsed) and self.cooldowns.hit(cd_key):
                 db.insert("messages", ignore=True, msg_id=msg["msg_id"],
                           group_name=msg["group"], sender=msg["sender"],
                           received_at=now(), msg_time=msg.get("msg_time") or None,
@@ -164,25 +215,83 @@ class Pipeline:
 
         codes = [it["code"] for it in audit_parsed["items"]] if audit_parsed else []
         matched_sols = solmod.find_solutions_for_codes(self.cfg.solutions, codes)
+        item = {"msg": msg, "entry": entry, "rule_hit": rule_hit, "trigger": trigger,
+                "source": source, "parsed": parsed, "audit_parsed": audit_parsed,
+                "audit_json": audit_json, "codes": codes, "matched_sols": matched_sols,
+                "arrived_at": now()}
+
+        # 同群聚合窗口：短时间连续报警合并为一次分析、一条统一回复，避免逐条刷屏；
+        # @我 与审计播报即时处理不聚合；no_aggregate（模拟注入）直通
+        agg_min = self._agg_minutes()
+        if (agg_min > 0 and trigger == "dingtalk_alert" and not audit_parsed
+                and not msg.get("no_aggregate")):
+            b = self._batches.get(msg["group"])
+            if b is None:
+                cd_key = f"{msg['group']}:{(parsed or {}).get('app') or ''}"
+                if self.cooldowns.hit(cd_key):
+                    db.insert("messages", ignore=True, msg_id=msg["msg_id"],
+                              group_name=msg["group"], sender=msg["sender"],
+                              received_at=now(), msg_time=msg.get("msg_time") or None,
+                              matched_entry_id=entry["id"],
+                              matched_rule="cooldown", run_id=None, source_text=msg["text"])
+                    return {"handled": False, "reason": "cooldown"}
+                b = {"items": []}
+                self._batches[msg["group"]] = b
+            b["items"].append(item)
+            db.audit("dingtalk", "alert_batched", msg["group"],
+                     f"聚合窗口{agg_min}分钟，批内{len(b['items'])}条", None)
+            if len(b["items"]) == 1:
+                await self._schedule_flush(msg["group"], agg_min)
+            return {"handled": True, "batched": True, "batch_size": len(b["items"])}
+        return await self._analyze_items([item])
+
+    async def _analyze_items(self, items):
+        """对 1 条或聚合批内多条报警执行一次分析：批内报警合并文本、共用一个 run、
+        只产出一条统一回复。"""
+        db = self.db
+        first = items[0]
+        msg = first["msg"]
+        trigger, source = first["trigger"], first["source"]
+        parsed, audit_parsed = first["parsed"], first["audit_parsed"]
+        codes, matched_sols = first["codes"], first["matched_sols"]
+        batched = len(items) > 1
+        identities = []
+        if batched:
+            parts = []
+            for i, it in enumerate(items, 1):
+                t = it["msg"]["text"]
+                at = correlate.alert_time_of(t)
+                rn = (parse_sunfire_alert(t) or {}).get("rule_name") or ""
+                identities.append({"time": at, "rule": rn})
+                parts.append(f"[第{i}/{len(items)}条报警] 预警时间 {at[5:] if at else '-'}"
+                             f"｜规则 {rn or '未知'}\n{t}")
+            text = "\n\n".join(parts)
+        else:
+            text = msg["text"]
 
         run_id = new_id("run")
-        db.insert("runs", run_id=run_id, task_id=entry["id"], trigger_type=trigger,
+        db.insert("runs", run_id=run_id, task_id=first["entry"]["id"], trigger_type=trigger,
                   source=msg["group"], status="running", engine=None, engine_version=None,
                   started_at=now(), finished_at=None, report_path=None, error_msg=None,
-                  source_text=msg["text"])
-        db.insert("messages", ignore=True, msg_id=msg["msg_id"], group_name=msg["group"],
-                  sender=msg["sender"], received_at=now(),
-                  msg_time=msg.get("msg_time") or None,
-                  matched_entry_id=entry["id"], matched_rule=rule_hit, run_id=run_id,
-                  source_text=msg["text"], parsed_json=audit_json)
-        db.audit("dingtalk", "msg_matched", msg["group"], rule_hit, run_id)
+                  source_text=text)
+        for it in items:
+            m = it["msg"]
+            db.insert("messages", ignore=True, msg_id=m["msg_id"], group_name=m["group"],
+                      sender=m["sender"], received_at=it["arrived_at"],
+                      msg_time=m.get("msg_time") or None,
+                      matched_entry_id=it["entry"]["id"], matched_rule=it["rule_hit"],
+                      run_id=run_id, source_text=m["text"], parsed_json=it["audit_json"])
+            db.audit("dingtalk", "msg_matched", m["group"], it["rule_hit"], run_id)
+        if batched:
+            db.audit("dingtalk", "alert_batch_analyzed", msg["group"],
+                     f"{len(items)}条报警合并为1次分析", run_id)
 
-        corr = correlate.build_context(db, msg["text"], codes, run_id=run_id)
+        corr = correlate.build_context(db, text, codes, run_id=run_id)
         if corr:
             db.audit("task", "correlation_detected", msg["group"],
                      json.dumps({k: corr[k] for k in ("type_key", "count", "orders", "batch")},
                                 ensure_ascii=False)[:300], run_id)
-        ctx_text = msg["text"]
+        ctx_text = text
         corr_ctx = correlate.render_context(corr)
         if corr_ctx:
             ctx_text = corr_ctx + "\n\n" + ctx_text
@@ -230,6 +339,8 @@ class Pipeline:
             result.setdefault("evidence_warning",
                               "⚠️ 报警含 traceId 但引擎未产出日志取证，结论置信度不足；"
                               "建议在报警中心点\"重新分析\"补充要求。")
+        if batched:
+            result["batch_alerts"] = identities
         reports.write_report(self.cfg, db, run_id, result, msg["group"], eng)
         self._handle_suggestions(run_id, result, source, matched_sols, msg["group"])
         if result.get("normal"):
@@ -245,9 +356,11 @@ class Pipeline:
             db.update("runs", "run_id", run_id, status="success", finished_at=now(),
                       engine=eng, engine_version=ver)
             self.notifier.raise_alerts(run_id, msg["group"], result.get("anomalies", []))
-            self._reply_if_allowed(msg["group"], result, run_id, msg.get("text") or "",
-                                   received_at=now())
-        return {"handled": True, "run_id": run_id, "normal": result.get("normal")}
+            self._reply_if_allowed(msg["group"], result, run_id, text, received_at=now())
+        out = {"handled": True, "run_id": run_id, "normal": result.get("normal")}
+        if batched:
+            out["batch_size"] = len(items)
+        return out
 
     def _reanalyze_prepare(self, orig_run_id, note):
         """同步准备：校验原 run、拼装重分析文本、落 run 记录。返回 (run_id, ctx) 或 None。"""
@@ -408,24 +521,36 @@ class Pipeline:
                            "result": s["exec_result"]} for s in steps]}
 
     def _build_reply_markdown(self, result, source_text="", received_at=""):
-        """回复卡片：头部带报警身份（规则名/预警时间/采集时间/app），
-        让群内开发者明确知道回复的是哪一条报警；历史关联统计条目标注 [历史关联]。"""
+        """回复卡片：头部带报警身份（规则名/预警时间/采集时间/app），聚合批一行列出全部报警；
+        全文单行距不留空行；历史关联统计条目标注 [历史关联]。"""
         md = "**LocalAgent 分析结论（仅供参考）**\n"
         parsed = parse_sunfire_alert(source_text) if source_text else None
-        at = correlate.alert_time_of(source_text) if source_text else ""
-        if parsed and parsed.get("rule_name"):
-            line = f"> 报警：{parsed['rule_name']}"
-            if parsed.get("app"):
+        ba = result.get("batch_alerts") or []
+        if ba:
+            desc = "、".join(
+                f"{(x.get('rule') or '报警')} {x.get('time', '')[5:] if x.get('time') else ''}".strip()
+                for x in ba)
+            line = f"> 聚合分析 {len(ba)} 条报警：{desc}"
+            if parsed and parsed.get("app"):
                 line += f"｜{parsed['app']}"
             md += line + "\n"
-        t_parts = []
-        if at:
-            t_parts.append(f"预警时间 {at[5:]}")
-        if received_at:
-            t_parts.append(f"采集 {received_at[5:16].replace('T', ' ')}")
-        if t_parts:
-            md += "> " + "｜".join(t_parts) + "\n"
-        md += "\n" + result.get("summary", "")
+            if received_at:
+                md += f"> 采集 {received_at[5:16].replace('T', ' ')}\n"
+        else:
+            at = correlate.alert_time_of(source_text) if source_text else ""
+            if parsed and parsed.get("rule_name"):
+                line = f"> 报警：{parsed['rule_name']}"
+                if parsed.get("app"):
+                    line += f"｜{parsed['app']}"
+                md += line + "\n"
+            t_parts = []
+            if at:
+                t_parts.append(f"预警时间 {at[5:]}")
+            if received_at:
+                t_parts.append(f"采集 {received_at[5:16].replace('T', ' ')}")
+            if t_parts:
+                md += "> " + "｜".join(t_parts) + "\n"
+        md += result.get("summary", "")
         for a in result.get("anomalies", []):
             s = (a.get("summary") or "").strip()
             if any(k in s for k in HISTORY_MARKERS) and not s.startswith("[历史关联]"):

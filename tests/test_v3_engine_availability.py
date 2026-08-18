@@ -33,7 +33,7 @@ class Cfg:
     mock = False
     workspace = tempfile.mkdtemp()
     agent = {"writes_disabled": False}
-    notify = {"cooldown_seconds": 0}
+    notify = {"cooldown_seconds": 0, "aggregate_minutes": 0}
     dingtalk = {"listen_all": True}
     solutions = []
     groups = [{"name": "改签监控群", "mode": "alert"}]
