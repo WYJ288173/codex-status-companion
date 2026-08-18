@@ -63,11 +63,21 @@ def parse_sunfire_alert(text):
     m_sup = re.search(r"已发送(\d+)条[，,]\s*被抑制(\d+)条", text)
     if m_sup:
         alert_stats = {"sent": int(m_sup.group(1)), "suppressed": int(m_sup.group(2))}
+    # 规则名：触发行的前两行（监控项组 + 指标名），排除应用名行
+    rule_name = None
+    lines = text.splitlines()
+    for i, l in enumerate(lines):
+        if re.search(r"共有\d+条数据触发", l):
+            prev = [p.strip() for p in lines[max(0, i - 2):i] if p.strip()]
+            prev = [p for p in prev if p != app]
+            if prev:
+                rule_name = " · ".join(prev[-2:])
+            break
     return {"app": app, "severity": severity,
             "sample_ip": m.group(1) if m else None,
             "trace_id": m.group(2) if m else None,
             "metrics": metric_lines[:5], "links": links[:3],
-            "alert_stats": alert_stats}
+            "alert_stats": alert_stats, "rule_name": rule_name}
 
 
 _ITEM_HEAD = re.compile(

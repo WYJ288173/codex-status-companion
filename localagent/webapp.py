@@ -536,7 +536,9 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                      "running": ("#f59e0b", "… 分析中"),
                      "engine_unavailable": ("#f59e0b", "⚠ 引擎不可用")}
         _rule_style = {"cooldown": "跳过(冷却)", "unrecognized": "未识别", "no_match": "未匹配",
-                       "broadcast_record_only": "记录不分析(仅@我)"}
+                       "broadcast_record_only": "记录不分析(仅@我)",
+                       "stale_delivery": "迟到投递·未分析", "duplicate_alert": "重复报警·已分析过",
+                       "stale_backfill": "老消息·未分析"}
         msg_out = ""
         for m in msg_rows:
             m = dict(m)

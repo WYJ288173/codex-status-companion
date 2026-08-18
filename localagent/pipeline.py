@@ -9,6 +9,9 @@ from .matcher import match_alert, parse_sunfire_alert, parse_audit_broadcast, Co
 UNCERTAIN_MARKERS = ("归因待定", "未证实", "未取到", "未核实", "无法确认",
                      "取证失败", "疑似", "存疑", "待验证", "原因不明", "根因未明")
 
+# 历史关联统计特征词：命中的异常条目在回复中标注 [历史关联]，与当前报警发现区分
+HISTORY_MARKERS = ("日均", "近30天", "近7天", "告警天数", "持续失败")
+
 
 class Pipeline:
     def __init__(self, cfg, db, notifier, ding):
@@ -77,6 +80,44 @@ class Pipeline:
                     db.audit("dingtalk", "msg_skipped_stale", msg["group"],
                              f"预警时间 {_at[:16]} 早于2小时窗口", None)
                     return {"handled": False, "reason": "stale_backfill"}
+            # 迟到投递降噪：预警时间远早于采集时间（默认60分钟）视为迟到投递，
+            # 只记录不分析不回复，避免老报警被当成新报警回复到群里
+            if _at and not audit_parsed:
+                from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+                _tz8 = _tz(_td(hours=8))
+                try:
+                    _at_dt = _dt.strptime(_at + " +0800", "%Y-%m-%d %H:%M %z")
+                    _delay_min = (_dt.now(_tz8) - _at_dt).total_seconds() / 60
+                except ValueError:
+                    _delay_min = 0.0
+                _stale_limit = int(self.cfg.notify.get("stale_delivery_minutes", 60))
+                if _delay_min > _stale_limit:
+                    db.insert("messages", ignore=True, msg_id=msg["msg_id"],
+                              group_name=msg["group"], sender=msg["sender"],
+                              received_at=now(), msg_time=msg.get("msg_time") or None,
+                              matched_entry_id=entry["id"],
+                              matched_rule="stale_delivery", run_id=None,
+                              source_text=msg["text"])
+                    db.audit("dingtalk", "stale_delivery_skipped", msg["group"],
+                             f"预警时间 {_at} 迟于采集 {int(_delay_min)} 分钟", None)
+                    return {"handled": False, "reason": "stale_delivery"}
+                # 同报警去重：同家族+同预警时间已有分析 run，不重复分析回复
+                _fam = correlate.family_key(msg["text"])
+                if _fam:
+                    for _r in db.q("SELECT source_text FROM messages WHERE run_id IS NOT NULL "
+                                   "ORDER BY received_at DESC LIMIT 100"):
+                        _st = _r["source_text"] or ""
+                        if (correlate.family_key(_st) == _fam
+                                and correlate.alert_time_of(_st) == _at):
+                            db.insert("messages", ignore=True, msg_id=msg["msg_id"],
+                                      group_name=msg["group"], sender=msg["sender"],
+                                      received_at=now(), msg_time=msg.get("msg_time") or None,
+                                      matched_entry_id=entry["id"],
+                                      matched_rule="duplicate_alert", run_id=None,
+                                      source_text=msg["text"])
+                            db.audit("dingtalk", "duplicate_alert_skipped", msg["group"],
+                                     f"同家族 {_fam} 预警时间 {_at} 已分析", None)
+                            return {"handled": False, "reason": "duplicate_alert"}
             cd_key = f"{msg['group']}:{(parsed or {}).get('app') or ''}"
             if self.cooldowns.hit(cd_key):
                 db.insert("messages", ignore=True, msg_id=msg["msg_id"],
@@ -199,7 +240,8 @@ class Pipeline:
             db.update("runs", "run_id", run_id, status="success", finished_at=now(),
                       engine=eng, engine_version=ver)
             self.notifier.raise_alerts(run_id, msg["group"], result.get("anomalies", []))
-            self._reply_if_allowed(msg["group"], result, run_id, msg.get("text") or "")
+            self._reply_if_allowed(msg["group"], result, run_id, msg.get("text") or "",
+                                   received_at=now())
         return {"handled": True, "run_id": run_id, "normal": result.get("normal")}
 
     def _reanalyze_prepare(self, orig_run_id, note):
@@ -289,7 +331,8 @@ class Pipeline:
                 src_type = "audit_group_at_me"
             self._handle_suggestions(run_id, result, src_type, matched_sols, grp)
             self.notifier.raise_alerts(run_id, run0["source"], result.get("anomalies", []))
-            self._reply_if_allowed(run0["source"], result, run_id, run0["source_text"] or "")
+            self._reply_if_allowed(run0["source"], result, run_id, run0["source_text"] or "",
+                                   received_at=now())
         db.audit("task", "reanalyze", orig_run_id, note[:200], run_id)
 
     async def reanalyze(self, orig_run_id, note):
@@ -359,10 +402,30 @@ class Pipeline:
                 "steps": [{"id": s["id"], "entry": s["entry_id"],
                            "result": s["exec_result"]} for s in steps]}
 
-    def _build_reply_markdown(self, result):
-        md = "**LocalAgent 分析结论（仅供参考）**\n\n" + result.get("summary", "")
+    def _build_reply_markdown(self, result, source_text="", received_at=""):
+        """回复卡片：头部带报警身份（规则名/预警时间/采集时间/app），
+        让群内开发者明确知道回复的是哪一条报警；历史关联统计条目标注 [历史关联]。"""
+        md = "**LocalAgent 分析结论（仅供参考）**\n"
+        parsed = parse_sunfire_alert(source_text) if source_text else None
+        at = correlate.alert_time_of(source_text) if source_text else ""
+        if parsed and parsed.get("rule_name"):
+            line = f"> 报警：{parsed['rule_name']}"
+            if parsed.get("app"):
+                line += f"｜{parsed['app']}"
+            md += line + "\n"
+        t_parts = []
+        if at:
+            t_parts.append(f"预警时间 {at[5:]}")
+        if received_at:
+            t_parts.append(f"采集 {received_at[5:16].replace('T', ' ')}")
+        if t_parts:
+            md += "> " + "｜".join(t_parts) + "\n"
+        md += "\n" + result.get("summary", "")
         for a in result.get("anomalies", []):
-            md += f"\n- [{a.get('severity')}] {a.get('summary')}"
+            s = (a.get("summary") or "").strip()
+            if any(k in s for k in HISTORY_MARKERS) and not s.startswith("[历史关联]"):
+                s = "[历史关联] " + s
+            md += f"\n- [{a.get('severity')}] {s}"
         return md
 
     @staticmethod
@@ -386,7 +449,7 @@ class Pipeline:
                 return bool(alert_type) and alert_type in types
         return False
 
-    def _reply_if_allowed(self, group, result, run_id, source_text=""):
+    def _reply_if_allowed(self, group, result, run_id, source_text="", received_at=""):
         from . import correlate as corrmod
         key = corrmod.family_key(source_text)
         alert_type = key.split(":", 1)[1] if key and key.startswith("kw:") else None
@@ -400,7 +463,7 @@ class Pipeline:
                            reject_reason="no enabled entry or group not allowed",
                            exec_result="skipped", ts=now())
             return
-        md = self._build_reply_markdown(result)
+        md = self._build_reply_markdown(result, source_text, received_at)
         type_tag = alert_type or "unclassified"
         if self._group_auto_reply(group, alert_type):
             certain, why = self._certain_reply(result, md)
