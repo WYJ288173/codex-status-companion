@@ -301,8 +301,10 @@ def build_app(app_ctx):
             # SQL 放宽到 3 天（分析时间可能晚于预警时间很久），再按预警时间在 Python 层过滤
             wide = (datetime.now(CST) - timedelta(days=3)).isoformat(timespec="seconds")
             sql = ("SELECT a.*, r.report_path AS report_path, r.trigger_type AS trigger_type, "
-                   "r.source_text AS run_text "
+                   "r.source_text AS run_text, m.collected_at AS collected_at "
                    "FROM alerts a LEFT JOIN runs r ON a.run_id=r.run_id "
+                   "LEFT JOIN (SELECT run_id, MIN(received_at) AS collected_at "
+                   "FROM messages GROUP BY run_id) m ON a.run_id=m.run_id "
                    f"WHERE a.status=? AND a.created_at >= ? AND ({TEST_FILTER} OR ?)")
             args = [status, wide, show_test]
             if sev:
@@ -312,6 +314,8 @@ def build_app(app_ctx):
             if f_group:
                 sql += " AND a.source_group LIKE ?"; args.append(f"%{f_group}%")
             rs = db.q(sql + " ORDER BY a.created_at DESC LIMIT 300", *args)
+            # run_id → pending_reply（auth_exec），供待确认行渲染「回复到钉群」按钮
+            pr_by_run = {h["run_id"]: h for h in pr_rows if h.get("run_id")}
             out = ""
             for a in rs:
                 at = alert_time_of(a["run_text"] or "")
@@ -327,13 +331,23 @@ def build_app(app_ctx):
                     chk = f"<td><input type='checkbox' class='sel' value='{a['alert_id']}'></td>"
                     btns = (f"<button onclick=\"act('{a['alert_id']}','ack')\">确认</button> "
                             f"<button class='gray' onclick=\"ignoreA('{a['alert_id']}')\">忽略</button> ")
+                    # 有对应 pending_reply 时提供「回复到钉群」（确认仅确认，不回复）
+                    pr = pr_by_run.get(a["run_id"])
+                    if pr:
+                        btns += f"<button onclick=\"sendReply({pr['id']})\">回复到钉群</button> "
                 btns += f"<button class='gray' onclick=\"reanalyze('{a['run_id']}')\">重新分析</button>"
                 for c, req in sol_codes_for(a):
                     btns += (f" <button onclick=\"trigSol('{a['alert_id']}','{c}',"
                              f"{json.dumps(req)})\">触发方案</button>")
                 tag = " <span class='warn'>[测试]</span>" if a["trigger_type"] == "simulate" else ""
-                time_cell = (f"<span title='报警发送时间（正文预警时间）'>{at[5:]}</span>"
-                             if at else f"<span title='无预警时间，显示分析时间'>{a['created_at'][11:19]}</span>")
+                collected = (a["collected_at"] or "")[5:16].replace("T", " ")
+                if at:
+                    time_cell = (f"<span title='报警发送时间（正文预警时间）'>{at[5:]}</span>"
+                                 + (f"<br><span style='color:#9fb3c0;font-size:11px' "
+                                    f"title='LocalAgent 采集到该消息的时间'>采集 {collected}</span>"
+                                    if collected else ""))
+                else:
+                    time_cell = f"<span title='无预警时间，显示分析时间'>{a['created_at'][11:19]}</span>"
                 out += (f"<tr>{chk}<td>{a['severity']}</td><td>{a['summary']}{tag}</td><td>{a['source_group']}</td>"
                         f"<td>{time_cell}</td><td>{link}</td><td>{a['status']}</td><td>{btns}</td></tr>")
             return out
@@ -632,7 +646,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                  "<p><button onclick=\"bulk('ack')\">批量确认</button> "
                  "<button class='gray' onclick=\"bulk('ignore')\">批量忽略</button> "
                  "<label style='font-size:12px;color:#9fb3c0'><input type='checkbox' onclick=\"document.querySelectorAll('.sel').forEach(c=>c.checked=this.checked)\"> 全选</label></p>"
-                 "<table><tr><th></th><th>级别</th><th>摘要</th><th>来源</th><th>预警时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
+                 "<table><tr><th></th><th>级别</th><th>摘要</th><th>来源</th><th>预警/采集时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
                  + (pend or "<tr><td colspan=8>无</td></tr>") + "</table></div>")
         body += ("<div class='card'><h2>钉群消息清单"
                  f"（{range_label}共 {total_msg} 条，每页 {PAGE_SZ} 条）</h2>"
@@ -640,7 +654,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                  + (orphan_html or "")
                  + (msg_out or "<p style='color:#9fb3c0'>无消息</p>")
                  + "<p style='font-size:12px'>" + "　".join(nav) + "</p></div>")
-        th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>预警时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
+        th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>预警/采集时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
         has_filter = bool(sev or kw or f_group or f_rule)
         hist = ""
         for title, st in (("无问题标注", "no_problem"), ("已确认", "acked"),

@@ -346,6 +346,10 @@ check("回复操作内聚卡片（无独立 reply_block）",
 check("孤儿待回复移到消息清单顶部",
       "待回复（无对应消息" in src and "reply_first" not in src)
 check("待回复卡片橙色边标识", "border-left:4px solid #f59e0b" in src)
+check("待确认行操作栏有回复到钉群按钮", "pr_by_run" in src and "回复到钉群" in src)
+check("确认按钮与回复按钮分离", ">确认</button>" in src and ">回复到钉群</button>" in src)
+check("时间列含采集时间", "collected_at" in src and "采集 {collected}" in src)
+check("表头改为预警/采集时间", "预警/采集时间" in src)
 
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",
