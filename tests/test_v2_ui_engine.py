@@ -264,9 +264,9 @@ db.insert("auth_exec", entry_id="e-orphan", run_id="run-orphan", action_type="re
           matched=1, exec_result="pending_reply", ts=now(),
           payload=json.dumps({"group": "改签监控群", "summary": "摘要B", "markdown": "草稿B"}))
 h3 = html_of("/alerts")
-check("待回复角标", "待回复 2 条" in h3)
-check("待回复内联进消息卡片", "待回复关联消息" in h3 and "发送回复" in h3)
-check("无消息对应的待回复兜底渲染", "摘要B" in h3 and "reply_first" in h3)
+check("待回复角标", "待回复到钉群 2 条" in h3)
+check("待回复内联进消息卡片", "回复到钉群" in h3)
+check("无消息对应的待回复兜底渲染", "待回复（无对应消息" in h3)
 
 # ---------- 3 天清理边界 ----------
 old_day = (datetime.now(CST) - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S")

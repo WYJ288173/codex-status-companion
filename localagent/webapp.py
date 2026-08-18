@@ -344,12 +344,17 @@ async function bulk(op){const ids=[...document.querySelectorAll('.sel:checked')]
 if(!ids.length){alert('请先勾选要操作的报警');return}
 if(!confirm('对 '+ids.length+' 条报警执行「'+(op==='ack'?'确认':'忽略')+'」？'))return;
 for(const id of ids){await fetch('/alerts/'+id+'/'+op,{method:'POST'})}location.reload()}
+function markRunning(run){const st=document.getElementById('st_'+run);
+if(st){st.innerHTML="<span style='color:#f59e0b'>… 分析中</span>";}
+const btn=document.getElementById('ra_'+run);if(btn){btn.disabled=true;btn.textContent='分析中…';}}
 async function reanalyze(run){const note=prompt('分析哪里不准？补充你的判断/线索，将携带该输入重新触发分析：');if(note===null)return;try{
 const j=await jfetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:note})});
-alert(j.new_run?('已触发重新分析：'+j.new_run):('失败：'+(j.error||'')));location.reload()}catch(e){alert('触发失败：'+e.message)}}
+if(j.error){alert('失败：'+j.error);return}
+markRunning(run);setTimeout(()=>location.reload(),800)}catch(e){alert('触发失败：'+e.message)}}
 async function retryFailed(run){if(!confirm('对该失败任务发起重新分析？'))return;try{
 const j=await jfetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:'失败重试'})});
-alert(j.new_run?('已触发重新分析：'+j.new_run):('失败：'+(j.error||'')));location.reload()}catch(e){alert('触发失败：'+e.message)}}
+if(j.error){alert('失败：'+j.error);return}
+markRunning(run);setTimeout(()=>location.reload(),800)}catch(e){alert('触发失败：'+e.message)}}
 async function trigSol(alertId,code,reqParams){let params={};
 for(const k of (reqParams||[])){const v=prompt('方案 '+code+' 需要参数 '+k+'，请输入：');if(v===null)return;params[k]=v.trim()}
 if(!confirm('手动触发解决方案 '+code+'？\\n将按方案生成执行计划并进入二次确认（不会立即执行写操作）。'))return;
@@ -407,33 +412,30 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                         cutoff)
         pending_reply_map = {}
 
-        def reply_html(h, anchor_id=""):
+        def reply_actions_html(h):
+            """待回复操作内聚到告警卡片：回复/丢弃/编辑 内联一行，去掉独立虚线框。"""
             try:
                 pl = json.loads(h.get("payload") or "{}")
             except Exception:
                 pl = {}
-            anom = pl.get("anomalies") or []
-            anom_str = "；".join(f"[{a.get('severity')}] {a.get('summary')}" for a in anom) or "-"
-            link = (f"<a style='color:#7ee7b0' href='/reports/view?p={h['report_path']}'>报告</a>"
-                    if h.get("report_path") else "")
             md = (pl.get("markdown") or "").replace("<", "&lt;")
-            anchor = f"id='{anchor_id}' " if anchor_id else ""
             blocked = (f" <span class='warn' style='font-size:11px'>⚠ {_esc(h['reject_reason'])}</span>"
                        if "拦截" in (h.get("reject_reason") or "") else "")
-            return (f"<div class='reply-block' {anchor}style='margin-top:8px;padding:8px;"
-                    f"border:1px dashed #f59e0b;border-radius:6px'>"
-                    f"<b style='color:#f59e0b'>待回复到钉群</b>{blocked} "
-                    f"<span style='color:#e6edf3;font-size:12px;border:1px solid #22303a;"
-                    f"border-radius:4px;padding:0 4px'>{_esc(pl.get('alert_type') or 'unclassified')}</span> "
-                    f"<span style='color:#9fb3c0;font-size:12px'>{_esc(pl.get('group', ''))} · "
-                    f"{_esc(pl.get('summary', ''))} · {h['ts']}</span> {link}"
-                    f"<div style='font-size:12px;color:#e6edf3;margin:4px 0'>{_esc(anom_str)}</div>"
-                    f"<button onclick=\"sendReply({h['id']})\">发送回复</button> "
+            link = (f" <a style='color:#7ee7b0;font-size:12px' href='/reports/view?"
+                    f"p={h['report_path']}'>报告</a>" if h.get("report_path") else "")
+            return (f"<div style='display:flex;gap:6px;align-items:center;flex-wrap:wrap;"
+                    f"margin-top:8px;padding-top:8px;border-top:1px dashed #f59e0b'>"
+                    f"<b style='color:#f59e0b;font-size:12px'>待回复</b> "
+                    f"<span style='color:#e6edf3;font-size:11px;border:1px solid #22303a;"
+                    f"border-radius:4px;padding:0 4px'>{_esc(pl.get('alert_type') or 'unclassified')}</span>"
+                    f"{blocked}{link} "
+                    f"<button onclick=\"sendReply({h['id']})\">回复到钉群</button> "
                     f"<button class='red' onclick=\"rejectReply({h['id']})\">丢弃</button> "
-                    f"<details style='display:inline-block;margin-left:8px'><summary style='cursor:pointer;"
-                    f"color:#9fb3c0;font-size:12px;display:inline'>编辑内容</summary>"
-                    f"<textarea id='ed_{h['id']}' style='width:96%;height:110px;background:#0f1417;color:#e6edf3;"
-                    f"border:1px solid #22303a;border-radius:6px;font-size:12px'>{md}</textarea><br>"
+                    f"<details style='display:inline-block'><summary style='cursor:pointer;"
+                    f"color:#9fb3c0;font-size:12px;display:inline'>编辑</summary>"
+                    f"<textarea id='ed_{h['id']}' style='width:96%;height:110px;background:#0f1417;"
+                    f"color:#e6edf3;border:1px solid #22303a;border-radius:6px;font-size:12px'>{md}"
+                    f"</textarea><br>"
                     f"<button class='gray' onclick=\"saveReply({h['id']})\">保存修改</button></details></div>")
 
         for i, h in enumerate(pr_rows):
@@ -442,8 +444,8 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
             if h.get("run_id"):
                 pending_reply_map[h["run_id"]] = h
         if pr_rows:
-            body += (f"<p><a href='#reply_first' style='color:#f59e0b;font-weight:bold'>"
-                     f"⚠ 待回复 {len(pr_rows)} 条 →</a></p>")
+            body += (f"<p style='color:#f59e0b;font-weight:bold;font-size:13px'>"
+                     f"⚠ 待回复到钉群 {len(pr_rows)} 条（已内聚在对应告警卡片，橙色边标识）</p>")
         listen_all = bool(app_ctx.cfg.dingtalk.get("listen_all", False))
         body += (f"<p style='font-size:12px;color:#9fb3c0'>监听范围："
                  f"{'监听处理所有告警消息' if listen_all else '仅处理@我的消息'}"
@@ -522,7 +524,6 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
         _rule_style = {"cooldown": "跳过(冷却)", "unrecognized": "未识别", "no_match": "未匹配",
                        "broadcast_record_only": "记录不分析(仅@我)"}
         msg_out = ""
-        reply_anchor = {"done": False}
         for m in msg_rows:
             m = dict(m)
             parsed = None
@@ -538,10 +539,12 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
             if m.get("run_id"):
                 color, label = _st_style.get(m.get("run_status") or "", ("#9fb3c0", m.get("run_status") or "-"))
                 rp = m.get("report_path")
-                st_tag = (f"<a style='color:{color}' href='/reports/view?p={_esc(rp)}'>{label} · 报告</a>"
-                          if rp else f"<span style='color:{color}'>{label}</span>")
+                inner = (f"<a style='color:{color}' href='/reports/view?p={_esc(rp)}'>{label} · 报告</a>"
+                         if rp else f"<span style='color:{color}'>{label}</span>")
+                st_tag = f"<span id='st_{_esc(m['run_id'])}'>{inner}</span>"
                 if m.get("run_status") in ("failed", "engine_unavailable"):
-                    st_tag += (f" <button class='gray' style='font-size:11px;padding:1px 8px' "
+                    st_tag += (f" <button id='ra_{_esc(m['run_id'])}' class='gray' "
+                               f"style='font-size:11px;padding:1px 8px' "
                                f"onclick=\"retryFailed('{_esc(m['run_id'])}')\">重新分析</button>")
             else:
                 st_tag = (f"<span style='color:#9fb3c0'>"
@@ -550,11 +553,11 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
             body_html = _broadcast_card(parsed) if parsed else (
                 f"<div style='margin-top:6px;font-size:13px;color:#e6edf3;white-space:pre-wrap'>"
                 f"{_esc(clean[:180])}{'…' if len(clean) > 180 else ''}</div>")
-            reply_block = ""
+            reply_actions = ""
+            card_border = "border:1px solid #22303a"
             if m.get("run_id") and m["run_id"] in pending_reply_map:
-                anchor = "reply_first" if not reply_anchor["done"] else ""
-                reply_anchor["done"] = True
-                reply_block = reply_html(pending_reply_map[m["run_id"]], anchor)
+                reply_actions = reply_actions_html(pending_reply_map[m["run_id"]])
+                card_border = "border:1px solid #f59e0b;border-left:4px solid #f59e0b"
             a_ts = alert_time_of(m.get("source_text"))  # YYYY-MM-DD HH:MM（正文「预警时间」）
             recv_t = (m.get('received_at') or '')[5:16].replace('T', ' ')
             mt = (m.get('msg_time') or '').strip()
@@ -570,7 +573,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                          f"title='LocalAgent 采集到该消息的时间'>采集 {recv_t}</span>"
                          if main_t else f"<span style='color:#9fb3c0'>{recv_t}</span>")
             msg_out += (
-                "<div style='border:1px solid #22303a;border-radius:8px;padding:10px;margin-bottom:8px;"
+                f"<div style='{card_border};border-radius:8px;padding:10px;margin-bottom:8px;"
                 "background:#0f1417'>"
                 f"<div style='display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px'>"
                 f"<span style='color:#e6edf3'>{time_cell}</span>"
@@ -578,7 +581,7 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                 f"{_esc(m.get('group_name'))}</span>"
                 f"<span style='color:#9fb3c0'>{_esc(m.get('sender'))}</span>{chips}"
                 f"<span style='margin-left:auto'>{st_tag}</span></div>"
-                f"{body_html}{reply_block}"
+                f"{body_html}{reply_actions}"
                 f"<details style='margin-top:6px'><summary style='cursor:pointer;color:#9fb3c0;"
                 f"font-size:11px'>原始全文</summary><pre style='font-size:11px'>"
                 f"{_esc(m.get('source_text'))}</pre></details></div>")
@@ -597,15 +600,17 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
         nav.append(f"<span style='color:#9fb3c0'>第 {msg_page}/{msg_pages} 页</span>")
         if msg_page < msg_pages:
             nav.append(f"<a style='color:#7ee7b0' href='/alerts?{msg_qs}&msg_page={msg_page+1}'>下一页</a>")
-        # 兜底：窗口内无对应消息的 pending_reply（如手动触发）单独渲染
+        # 孤儿 pending_reply（窗口内无对应消息）：渲染为消息清单顶部的紧凑卡片，不再底部单独罗列
         win_run_ids = {r["run_id"] for r in db.q(
             "SELECT run_id FROM messages WHERE received_at >= ? AND run_id IS NOT NULL", cutoff)}
         orphan_html = ""
         for h in pr_rows:
             if (h.get("run_id") or "") not in win_run_ids:
-                anchor = "reply_first" if not reply_anchor["done"] else ""
-                reply_anchor["done"] = True
-                orphan_html += reply_html(h, anchor)
+                orphan_html += (
+                    "<div style='border:1px solid #f59e0b;border-left:4px solid #f59e0b;"
+                    "border-radius:8px;padding:10px;margin-bottom:8px;background:#0f1417'>"
+                    f"<div style='font-size:12px;color:#9fb3c0'>待回复（无对应消息 · {_esc(h['ts'])}）</div>"
+                    + reply_actions_html(h) + "</div>")
         body += ("<div class='card'><h2>搜索</h2>"
                  f"<form method='get' style='display:flex;gap:8px;flex-wrap:wrap;align-items:center'>"
                  f"时间 <select name='range'>"
@@ -632,8 +637,8 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
         body += ("<div class='card'><h2>钉群消息清单"
                  f"（{range_label}共 {total_msg} 条，每页 {PAGE_SZ} 条）</h2>"
                  f"<p style='font-size:12px'>{range_links}</p>"
-                 + (msg_out or "<p style='color:#9fb3c0'>无消息</p>")
                  + (orphan_html or "")
+                 + (msg_out or "<p style='color:#9fb3c0'>无消息</p>")
                  + "<p style='font-size:12px'>" + "　".join(nav) + "</p></div>")
         th = "<tr><th>级别</th><th>摘要</th><th>来源</th><th>预警时间</th><th>报告</th><th>状态</th><th>操作</th></tr>"
         has_filter = bool(sev or kw or f_group or f_rule)
@@ -686,6 +691,8 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
         if not prep:
             return {"error": "原记录不存在"}
         new_run, ctx = prep
+        # 消息卡片 run_id 指向新 run，刷新后状态即显示「分析中」并随新 run 流转
+        db.exec("UPDATE messages SET run_id=? WHERE run_id=?", new_run, run_id)
         # 分析放后台：客户端断开不再中断分析
         bg.add_task(app_ctx.pipeline._reanalyze_execute, new_run, ctx)
         return {"new_run": new_run}

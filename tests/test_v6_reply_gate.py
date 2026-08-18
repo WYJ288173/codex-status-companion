@@ -337,6 +337,16 @@ check("断采超 5 分钟提醒", "poll_down_alert" in dingsrc2 and "采集中�
 check("轮询间隔默认 20s", 'dt_cfg.get("poll_seconds", 20)' in dingsrc2)
 check("手动发送不确定结论需二次确认", "仍要发送？" in src and "force" in src)
 
+# ---------- 10. 重新分析状态流转 + 回复内聚卡片 ----------
+check("重新分析后消息 run_id 指向新 run",
+      "UPDATE messages SET run_id=? WHERE run_id=?" in src)
+check("重新分析成功立即切分析中", "markRunning" in src and "… 分析中" in src)
+check("回复操作内聚卡片（无独立 reply_block）",
+      "reply_actions_html" in src and "reply-block" not in src)
+check("孤儿待回复移到消息清单顶部",
+      "待回复（无对应消息" in src and "reply_first" not in src)
+check("待回复卡片橙色边标识", "border-left:4px solid #f59e0b" in src)
+
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",
       "<div id=\"modal\">" not in petsrc and "id='mlist'" not in petsrc
