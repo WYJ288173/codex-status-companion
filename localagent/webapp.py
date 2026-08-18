@@ -358,7 +358,9 @@ const j=await r.json();if(j.error){alert('触发失败：'+j.error);return}
 alert('已生成执行计划 '+j.run_id+'（'+j.steps.length+' 步）。请到「权限设置」页二次确认后再执行。');location.reload()}
 async function jfetch(u,opt){const r=await fetch(u,opt);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
 async function sendReply(id){if(!confirm('确认发送回复到钉群？'))return;try{
-const j=await jfetch('/api/auth_exec/'+id+'/send_reply',{method:'POST'});
+let j=await jfetch('/api/auth_exec/'+id+'/send_reply',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+if(j.confirm){if(!confirm(j.confirm))return;
+j=await jfetch('/api/auth_exec/'+id+'/send_reply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});}
 alert(j.result||('失败：'+(j.error||'未知错误')));location.reload()}catch(e){alert('发送失败：'+e.message)}}
 async function rejectReply(id){if(!confirm('确认丢弃该回复？'))return;try{
 const j=await jfetch('/api/auth_exec/'+id+'/reject_reply',{method:'POST'});
@@ -416,9 +418,11 @@ alert(j.ok?('门禁已：'+(j.enabled?'开启':'关闭')):(j.error||'失败'));l
                     if h.get("report_path") else "")
             md = (pl.get("markdown") or "").replace("<", "&lt;")
             anchor = f"id='{anchor_id}' " if anchor_id else ""
+            blocked = (f" <span class='warn' style='font-size:11px'>⚠ {_esc(h['reject_reason'])}</span>"
+                       if "拦截" in (h.get("reject_reason") or "") else "")
             return (f"<div class='reply-block' {anchor}style='margin-top:8px;padding:8px;"
                     f"border:1px dashed #f59e0b;border-radius:6px'>"
-                    f"<b style='color:#f59e0b'>待回复到钉群</b> "
+                    f"<b style='color:#f59e0b'>待回复到钉群</b>{blocked} "
                     f"<span style='color:#e6edf3;font-size:12px;border:1px solid #22303a;"
                     f"border-radius:4px;padding:0 4px'>{_esc(pl.get('alert_type') or 'unclassified')}</span> "
                     f"<span style='color:#9fb3c0;font-size:12px'>{_esc(pl.get('group', ''))} · "
@@ -1058,7 +1062,26 @@ window.addEventListener('load',watchExecuting)
         return {"result": "已提交后台执行，正在运行…（页面将自动刷新结果）"}
 
     @app.post("/api/auth_exec/{exec_id}/send_reply")
-    def auth_exec_send_reply(exec_id: int):
+    async def auth_exec_send_reply(exec_id: int, request: Request):
+        from .pipeline import UNCERTAIN_MARKERS
+        force = False
+        try:
+            data = await request.json()
+            force = bool(data.get("force"))
+        except Exception:
+            pass
+        if not force:
+            row = db.one("SELECT payload FROM auth_exec WHERE id=? AND exec_result='pending_reply'",
+                         exec_id)
+            if row:
+                try:
+                    pl = json.loads(row["payload"] or "{}")
+                except Exception:
+                    pl = {}
+                text = str(pl.get("summary", "")) + "\n" + str(pl.get("markdown", ""))
+                hit = next((m for m in UNCERTAIN_MARKERS if m in text), None)
+                if hit:
+                    return {"confirm": f"结论含不确定表述「{hit}」，按规范不应回复钉群。仍要发送？"}
         try:
             out = app_ctx.pipeline.send_reply(exec_id)
         except Exception as e:

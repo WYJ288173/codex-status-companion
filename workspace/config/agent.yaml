@@ -4,7 +4,7 @@ dingtalk:
   send: dws
   reply_enabled: true
   process_mode: at_me_only
-  poll_seconds: 60
+  poll_seconds: 20
   backfill_hours: 1
   webhook_url: ''
   webhook_secret: ''

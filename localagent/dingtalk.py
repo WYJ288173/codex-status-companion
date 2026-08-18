@@ -46,7 +46,7 @@ class DwsDingTalk:
         self.db = db
         self.on_message = on_message
         dt_cfg = cfg.dingtalk
-        self.poll_seconds = int(dt_cfg.get("poll_seconds", 60))
+        self.poll_seconds = int(dt_cfg.get("poll_seconds", 20))
         self.backfill_hours = int(dt_cfg.get("backfill_hours", 1))
         self.send_channel = dt_cfg.get("send", "dws")
         self.groups = {g.get("name"): g for g in cfg.groups}
@@ -55,18 +55,44 @@ class DwsDingTalk:
         self.db.set_state("dingtalk_conn", "dws_polling")
         self.db.audit("dingtalk", "conn_started", "", "dws polling mode")
         last = self.db.get_state("dws_last_poll")
+        err_since = None
+        down_alert_at = None
         while True:
-            try:
-                await self.poll_once(last)
-                # dws 接口吐消息延迟可达 15 分钟以上：游标回退 30 分钟安全余量，
-                # 避免迟到的消息因 createTime 早于游标被永久漏采；
-                # msg_id 去重保证重叠窗口不会重复处理
-                last = (datetime.now(CST) - timedelta(minutes=30)).isoformat(timespec="seconds")
-                self.db.set_state("dws_last_poll", last)
-                self.db.set_state("dingtalk_conn", "dws_polling")
-            except Exception as e:
-                self.db.set_state("dingtalk_conn", "dws_error")
-                self.db.audit("dingtalk", "poll_failed", "", str(e)[:200])
+            ok = False
+            # 失败快速重试：瞬时网络错误 10s 退避重试，避免干等下一轮扩大采集空窗
+            for attempt in range(3):
+                try:
+                    await self.poll_once(last)
+                    # dws 接口吐消息延迟可达 15 分钟以上：游标回退 30 分钟安全余量，
+                    # 避免迟到的消息因 createTime 早于游标被永久漏采；
+                    # msg_id 去重保证重叠窗口不会重复处理
+                    last = (datetime.now(CST) - timedelta(minutes=30)).isoformat(timespec="seconds")
+                    self.db.set_state("dws_last_poll", last)
+                    self.db.set_state("dingtalk_conn", "dws_polling")
+                    ok = True
+                    break
+                except Exception as e:
+                    self.db.set_state("dingtalk_conn", "dws_error")
+                    self.db.audit("dingtalk", "poll_failed", "", str(e)[:200])
+                    if attempt < 2:
+                        await asyncio.sleep(10)
+            now_dt = datetime.now(CST)
+            if ok:
+                err_since = None
+                down_alert_at = None
+            else:
+                # 断采提醒：持续失败超 5 分钟显式提醒，之后每 10 分钟提醒一次
+                if err_since is None:
+                    err_since = now_dt
+                if (now_dt - err_since) >= timedelta(minutes=5) and (
+                        down_alert_at is None
+                        or (now_dt - down_alert_at) >= timedelta(minutes=10)):
+                    mins = int((now_dt - err_since).total_seconds() // 60)
+                    self.db.set_state("dingtalk_conn", "dws_down")
+                    self.db.set_state("pet_toast", f"⚠ 钉钉采集中断已 {mins} 分钟，请检查网络/dws")
+                    self.db.set_state("pet_toast_ts", now())
+                    self.db.audit("dingtalk", "poll_down_alert", "", f"down {mins}min")
+                    down_alert_at = now_dt
             await asyncio.sleep(self.poll_seconds)
 
     async def _dws(self, argv):

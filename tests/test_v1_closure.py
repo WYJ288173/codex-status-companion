@@ -157,7 +157,8 @@ class ReplyCfg:
 
 rd = ReplyDing()
 rp = Pipeline(ReplyCfg(), db, n, rd)
-result2 = {"summary": "测试异常", "anomalies": [{"severity": "P2", "summary": "金额不符"}]}
+result2 = {"conclusion": "【外部域问题】外部渠道返回失败，根因确定",
+           "summary": "测试异常", "anomalies": [{"severity": "P2", "summary": "金额不符"}]}
 rp._reply_if_allowed("test-group", result2, "run-reply1")
 pr = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply1' AND exec_result='pending_reply'")
 check("无白名单 → pending_reply", pr is not None, str(pr))

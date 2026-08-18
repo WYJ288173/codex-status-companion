@@ -148,7 +148,8 @@ class OkDing:
         return self.ok
 
 
-result = {"summary": "s", "anomalies": [{"severity": "P2", "summary": "x"}]}
+result = {"conclusion": "【外部域问题】外部渠道占座失败，根因确定",
+          "summary": "s", "anomalies": [{"severity": "P2", "summary": "x"}]}
 
 GateCfg.groups = [{"name": "g1", "auto_reply_types": ["验价", "验座"]}]
 p = Pipeline(GateCfg(), db, notifier, OkDing())
@@ -275,6 +276,66 @@ check("轮询游标回退30分钟防 dws 延迟漏采",
       "timedelta(minutes=30)).isoformat" in open(
           os.path.join(os.path.dirname(__file__), "..", "localagent", "dingtalk.py"),
           encoding="utf-8").read())
+
+# ---------- 9. 回复确定性门禁 + 采集时效 ----------
+from localagent.pipeline import Pipeline as PL2, UNCERTAIN_MARKERS
+_md_ok = "**LocalAgent 分析结论（仅供参考）**\n\n外部渠道占座失败"
+check("确定结论放行", PL2._certain_reply({"conclusion": "【外部域问题】渠道占座失败"}, _md_ok)[0])
+check("归因待定拦截", not PL2._certain_reply({"conclusion": "【归因待定】日志未取到"}, _md_ok)[0])
+check("无归因前缀拦截", not PL2._certain_reply({"conclusion": "渠道占座失败"}, _md_ok)[0])
+check("正文含不确定词拦截",
+      not PL2._certain_reply({"conclusion": "【域内问题】疑似空指针"}, _md_ok + " 疑似竞态")[0])
+check("黑名单含归因待定/未取到",
+      "归因待定" in UNCERTAIN_MARKERS and "未取到" in UNCERTAIN_MARKERS)
+
+
+class _GateCfg:
+    workspace = ws
+    agent = {"writes_disabled": False}
+    notify = {}
+    dingtalk = {"reply_enabled": True}
+    auth_entries = [{"id": "dt-reply", "app": "dingtalk", "scope": "write",
+                     "feature": "回复分析结论到值班群",
+                     "constraints": {"groups": ["改签底座质量监控"]}, "enabled": True}]
+    groups = [{"name": "改签底座质量监控", "auto_reply_types": ["预订"]}]
+    mock = True
+
+
+class _GateDing:
+    def __init__(self):
+        self.calls = []
+    def reply(self, g, t):
+        self.calls.append((g, t))
+        return True
+
+
+_gd = _GateDing()
+n = Notifier(_GateCfg(), db)
+_gp = PL2(_GateCfg(), db, n, _gd)
+_gp._reply_if_allowed("改签底座质量监控",
+                      {"conclusion": "【归因待定】trace日志和外部返回未取到",
+                       "summary": "预订失败重试，归因待定", "anomalies": []},
+                      "run-gate-blocked", source_text="改签底座-改签预定指标 预警时间: 2026-08-18 08:44")
+check("不确定结论自动回复被拦截（不调 ding）", len(_gd.calls) == 0, str(_gd.calls))
+_blk = db.one("SELECT * FROM auth_exec WHERE run_id='run-gate-blocked'")
+check("拦截后转人工卡片", _blk is not None and _blk["exec_result"] == "pending_reply"
+      and "拦截" in (_blk["reject_reason"] or ""), str(_blk and _blk["reject_reason"]))
+check("拦截留 reply_auto_blocked 审计",
+      db.one("SELECT 1 FROM audit_logs WHERE action='reply_auto_blocked' "
+             "AND run_id='run-gate-blocked'") is not None)
+_gp._reply_if_allowed("改签底座质量监控",
+                      {"conclusion": "【外部域问题】渠道占座失败，确定性根因",
+                       "summary": "外部渠道占座失败", "anomalies": []},
+                      "run-gate-pass", source_text="改签底座-改签预定指标 预警时间: 2026-08-18 08:47")
+check("确定结论自动回复放行", len(_gd.calls) == 1, str(_gd.calls))
+
+dingsrc2 = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "dingtalk.py"),
+                encoding="utf-8").read()
+check("轮询失败 10s 退避重试", "for attempt in range(3)" in dingsrc2
+      and "await asyncio.sleep(10)" in dingsrc2)
+check("断采超 5 分钟提醒", "poll_down_alert" in dingsrc2 and "采集中断" in dingsrc2)
+check("轮询间隔默认 20s", 'dt_cfg.get("poll_seconds", 20)' in dingsrc2)
+check("手动发送不确定结论需二次确认", "仍要发送？" in src and "force" in src)
 
 # ---------- 6. 悬浮窗纯状态灯（G1/G3 防回归） ----------
 check("悬浮窗已移除待确认异常 modal",

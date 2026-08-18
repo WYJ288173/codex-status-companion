@@ -5,6 +5,10 @@ from . import solutions as solmod
 from .db import new_id, now
 from .matcher import match_alert, parse_sunfire_alert, parse_audit_broadcast, Cooldowns
 
+# 不确定表述黑名单：含任一表述的结论禁止自动回复钉群（只能是确定性根因结论）
+UNCERTAIN_MARKERS = ("归因待定", "未证实", "未取到", "未核实", "无法确认",
+                     "取证失败", "疑似", "存疑", "待验证", "原因不明", "根因未明")
+
 
 class Pipeline:
     def __init__(self, cfg, db, notifier, ding):
@@ -361,6 +365,19 @@ class Pipeline:
             md += f"\n- [{a.get('severity')}] {a.get('summary')}"
         return md
 
+    @staticmethod
+    def _certain_reply(result, md):
+        """自动回复确定性门禁：结论必须以【外部域问题】/【域内问题】开头，
+        且全文不含不确定表述；否则禁止自动回复（转人工审核）。"""
+        concl = (result.get("conclusion") or "").strip()
+        if not (concl.startswith("【外部域问题】") or concl.startswith("【域内问题】")):
+            return False, "结论未以【外部域问题】/【域内问题】开头"
+        text = concl + "\n" + md
+        hit = next((m for m in UNCERTAIN_MARKERS if m in text), None)
+        if hit:
+            return False, f"结论含不确定表述「{hit}」"
+        return True, ""
+
     def _group_auto_reply(self, group_name, alert_type=None):
         """仅白名单类型放行自动回复；unclassified 与未配置类型一律转人工。"""
         for g in self.cfg.groups:
@@ -386,6 +403,21 @@ class Pipeline:
         md = self._build_reply_markdown(result)
         type_tag = alert_type or "unclassified"
         if self._group_auto_reply(group, alert_type):
+            certain, why = self._certain_reply(result, md)
+            if not certain:
+                # 不确定结论禁止自动回复：转人工卡片并标注拦截原因
+                self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
+                               action_type="message_write", matched=1,
+                               reject_reason=f"自动回复被拦截：{why}，请人工审核",
+                               exec_result="pending_reply", ts=now(),
+                               payload=json.dumps({"group": group, "markdown": md,
+                                                   "run_id": run_id,
+                                                   "alert_type": type_tag,
+                                                   "summary": result.get("summary", ""),
+                                                   "anomalies": result.get("anomalies", [])},
+                                                  ensure_ascii=False))
+                self.db.audit("dingtalk", "reply_auto_blocked", group, why, run_id)
+                return
             if self.ding.reply(group, md):
                 self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
                                action_type="message_write", matched=1, reject_reason="",
