@@ -40,6 +40,11 @@ class Pipeline:
         # 后台开启 listen_all 后监听处理所有告警消息（优先于群级 process_mode）。
         if not msg.get("at_me") and not bool(self.cfg.dingtalk.get("listen_all", False)):
             return {"handled": False, "reason": "non_at_me_silent"}
+        # 自回复降噪：LocalAgent 自己回复到群里的结论消息被读回后不得当成新报警分析，
+        # 否则会形成自我匹配、污染同类关联池并产生重复结论
+        if (msg.get("text") or "").lstrip("*").strip().startswith("LocalAgent 分析结论"):
+            db.audit("dingtalk", "self_reply_skipped", msg["group"], "", None)
+            return {"handled": False, "reason": "self_reply"}
         entries = self.cfg.auth_entries
         parsed = parse_sunfire_alert(msg["text"])
         audit_parsed = parse_audit_broadcast(msg["text"])

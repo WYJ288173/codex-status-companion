@@ -80,9 +80,9 @@ def add_run2(rid, text, minutes_ago):
                finished_at=ts, report_path=None, error_msg=None, source_text=text)
 
 
-# 中风险：3 个订单
-add_run2("m1", "验价失败 订单1111111111111", 8)
-add_run2("m2", "验价失败 订单2222222222222", 6)
+# 中风险：3 个订单、预警跨度 10-30 分钟（≤10 分钟密集 3 单按新门槛为高风险）
+add_run2("m1", "验价失败 订单1111111111111", 20)
+add_run2("m2", "验价失败 订单2222222222222", 10)
 c_med = correlate.build_context(db2, "验价失败 订单3333333333333", [], run_id="m3")
 check("3单判定为中风险", c_med["risk_level"] == "medium")
 rendered_med = correlate.render_context(c_med)
@@ -102,13 +102,14 @@ res_high = {"normal": False, "anomalies": [{"severity": "P3", "summary": "预订
 check("高风险升级P1", correlate.apply_batch_escalation(res_high, c_high) is True
       and res_high["anomalies"][0]["severity"] == "P1")
 
-# 高风险②：持续 >10 分钟且近 10 分钟仍有新订单失败
-add_run2("s1", "生单失败 订单5555555555551", 25)
-add_run2("s2", "生单失败 订单5555555555552", 15)
+# 高风险②：≥2 条独立报警、跨度 ≤10 分钟且 ≥3 订单持续失败
+add_run2("s1", "生单失败 订单5555555555551", 9)
+add_run2("s2", "生单失败 订单5555555555552", 7)
 add_run2("s3", "生单失败 订单5555555555553", 5)
+add_run2("s3b", "生单失败 订单5555555555550", 3)
 c_sus = correlate.build_context(db2, "生单失败 订单5555555555554", [], run_id="s4")
-check("持续>10分钟且近10分钟有新单判定为高风险",
-      c_sus["risk_level"] == "high" and c_sus["span_min"] > 10 and c_sus["sustained"])
+check("密集多单持续失败判定为高风险",
+      c_sus["risk_level"] == "high" and c_sus["sustained"] and len(c_sus["orders"]) >= 5)
 res_sus = {"normal": False, "anomalies": [{"severity": "P3", "summary": "生单失败"}]}
 check("持续型高风险升级P1", correlate.apply_batch_escalation(res_sus, c_sus) is True
       and res_sus["anomalies"][0]["severity"] == "P1")

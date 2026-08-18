@@ -56,9 +56,19 @@ def family_key(text, codes=None):
     return None
 
 
+def _is_ts_like(n):
+    """形似时间戳的数字不算订单：13 位毫秒 epoch（2024-2033，17/18 开头）或 10 位秒 epoch。"""
+    return bool(re.fullmatch(r"(?:17|18)\d{11}", n)) or bool(re.fullmatch(r"1[6-9]\d{8}", n))
+
+
 def extract_orders(text):
-    """从报警文本提取订单号（10-20 位纯数字），去重返回排序列表。"""
-    return sorted(set(ORDER_RE.findall(text or "")))
+    """从报警文本提取订单号（10-20 位纯数字），去重返回排序列表。
+    先剔除 URL、采样行与 IP#Err# 采样串（含 alarmTime 时间戳等噪音），再过滤时间戳形态数字。"""
+    t = text or ""
+    t = re.sub(r"https?://\S+", " ", t)
+    t = "\n".join(l for l in t.splitlines() if "采样" not in l)
+    t = re.sub(r"\d{1,3}(?:\.\d{1,3}){3}#Err#\S+", " ", t)
+    return sorted({n for n in ORDER_RE.findall(t) if not _is_ts_like(n)})
 
 
 def _parse_ts(s):
@@ -71,26 +81,43 @@ def _parse_ts(s):
     return ts
 
 
+def _alert_dt(text, fallback):
+    """优先正文预警时间（报警真实发生时间），解析不到回退采集/分析时间。"""
+    at = alert_time_of(text)
+    if at:
+        try:
+            return datetime.strptime(at, "%Y-%m-%d %H:%M")
+        except ValueError:
+            pass
+    return fallback
+
+
 def build_context(db, text, codes, run_id=None, window_min=30):
     """检索窗口内同类历史 run 并研判；同类≥2 条（含当前）返回关联上下文，否则 None。
-    窗口取 30 分钟以支撑「持续 >10 分钟」判定；近 10 分钟子窗口用于风险分级。"""
+    窗口按预警时间（报警发生时间）判定而非分析时间，避免迟到投递的报警被「拉近」误判同批；
+    预警时间跨度大的报警不算同批，定级强制 low。"""
     key = family_key(text, codes)
     if not key:
         return None
     now = datetime.now()
-    cutoff = now - timedelta(minutes=window_min)
-    recent_cutoff = now - timedelta(minutes=10)
+    cur_ts = _alert_dt(text, now)
+    cutoff = cur_ts - timedelta(minutes=window_min)
+    recent_cutoff = cur_ts - timedelta(minutes=10)
     rows = db.q("SELECT run_id, source_text, started_at FROM runs "
                 "WHERE started_at IS NOT NULL ORDER BY started_at DESC LIMIT 200")
     peers = []
     for r in rows:
         if run_id and r["run_id"] == run_id:
             continue
-        ts = _parse_ts(r["started_at"])
-        if not ts or ts < cutoff:
+        st = _parse_ts(r["started_at"])
+        if not st:
             continue
-        if family_key(r["source_text"] or "") == key:
-            peers.append({"run_id": r["run_id"], "source_text": r["source_text"], "ts": ts})
+        if family_key(r["source_text"] or "") != key:
+            continue
+        pts = _alert_dt(r["source_text"] or "", st)
+        if pts < cutoff or pts > cur_ts + timedelta(minutes=5):
+            continue
+        peers.append({"run_id": r["run_id"], "source_text": r["source_text"], "ts": pts})
     if not peers:
         return None
     orders = set(extract_orders(text))
@@ -103,14 +130,16 @@ def build_context(db, text, codes, run_id=None, window_min=30):
     orders = sorted(orders)
     same_order = len(orders) == 1
     batch = len(orders) >= 2
-    ts_all = [p["ts"] for p in peers] + [now]
+    ts_all = [p["ts"] for p in peers] + [cur_ts]
     span_min = (max(ts_all) - min(ts_all)).total_seconds() / 60
     # 持续性：近 10 分钟滚动窗口内出现 ≥2 个不同失败订单（含当前）视为持续有新订单失败
     sustained = len(recent_orders) >= 2
     m = len(orders)
-    if len(recent_orders) >= 5 or (span_min > 10 and sustained):
+    # 定级门槛收紧：high 需近 10 分钟 ≥5 订单，或 ≥2 条独立报警（预警时间跨度 ≤10 分钟）
+    # 且 ≥3 个订单持续失败；2 单小体量即使密集也至多 medium；跨度 >30 分钟一律 low
+    if len(recent_orders) >= 5 or (span_min <= 10 and sustained and m >= 3):
         risk = "high"
-    elif m >= 3:
+    elif m >= 3 and span_min <= 30:
         risk = "medium"
     else:
         risk = "low"
@@ -143,8 +172,8 @@ def render_context(corr):
             impact = (base + "批量问题信号，必须追加取证：①用 sunfire-cli 查该类操作成功率/失败量趋势确认是否整体下跌；"
                       "②排查近 30 分钟内相关应用是否有发布/配置变更/开关动作")
         else:
-            impact = (base + "≤2 订单且无持续新订单报警，属偶发，影响面小，定级不升级（≤P3），"
-                      "结论须注明『偶发批量失败，影响面小』，给出涉及订单号")
+            impact = (base + "预警时间跨度大或体量小，属偶发，影响面小，严禁定级升级为 P1/P2（≤P3），"
+                      "不得表述为批量失败需人工排查；结论须注明『偶发失败，影响面小』，给出涉及订单号")
     else:
         impact = "未提取到订单号，按报警内容研判影响面"
     return (f"【同类报警关联】近 {corr['window_min']} 分钟内同类报警（{kind}）共 {corr['count']} 条，"
