@@ -174,7 +174,12 @@
 ## 备注（Reply Risk Gate）
 - 对照 §8.10 验收：群级配置不能绕过门禁✓、无 A 档证据不自动✓、自动回复必带依据✓、
   高风险标记转待确认✓、报告/payload 可见决策✓、全套回归通过✓。
-- 阶段 4（P1）未实施：低风险答疑语雀/代码只读 evidence 收集链路、50-100 条真实回放集。
+- P1-3 已完成：tests/replay_risk_gate.py 真实回放集——79 条历史报告按 Goal 业务口径
+  标注期望决策，门禁决策 100% 一致；真实数据全部标注为 pending_confirm（均为含订单/
+  批量/审计等高风险内容的监控报警），验证了保守门禁不漏放。auto_reply 正向路径由
+  test_v12 合成用例覆盖。
+- P1-2 未实施：低风险答疑语雀/代码只读 evidence 收集链路（需引擎侧结构化输出
+  source_type/source_ref/strength）。
 - 开启路径：验收后将 reply_policy.yaml 的 auto_reply.enabled 置 true，
   仅 low_risk_qa/monitor_recovered/history_duplicate 场景可能自动回复，
   监控异常/审计/写操作场景永远待确认。
