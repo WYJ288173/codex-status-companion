@@ -356,7 +356,9 @@ class Pipeline:
             db.update("runs", "run_id", run_id, status="success", finished_at=now(),
                       engine=eng, engine_version=ver)
             self.notifier.raise_alerts(run_id, msg["group"], result.get("anomalies", []))
-            self._reply_if_allowed(msg["group"], result, run_id, text, received_at=now())
+            # 批回复的「采集」取批内最早到达时间（真实采集时刻），而非分析完成时刻
+            recv = min(it["arrived_at"] for it in items) if batched else now()
+            self._reply_if_allowed(msg["group"], result, run_id, text, received_at=recv)
         out = {"handled": True, "run_id": run_id, "normal": result.get("normal")}
         if batched:
             out["batch_size"] = len(items)
@@ -527,9 +529,22 @@ class Pipeline:
         parsed = parse_sunfire_alert(source_text) if source_text else None
         ba = result.get("batch_alerts") or []
         if ba:
-            desc = "、".join(
-                f"{(x.get('rule') or '报警')} {x.get('time', '')[5:] if x.get('time') else ''}".strip()
-                for x in ba)
+            groups = {}
+            for x in ba:
+                groups.setdefault(x.get("rule") or "报警", []).append(x.get("time") or "")
+            segs = []
+            for rule, times in groups.items():
+                ts = sorted(t for t in times if t)
+                if len(ts) >= 2 and ts[0] != ts[-1]:
+                    rng = f"（{ts[0][5:]}~{ts[-1][5:]}）"
+                elif ts:
+                    rng = f"（{ts[0][5:]}）"
+                else:
+                    rng = ""
+                segs.append(f"{rule} {len(times)}次{rng}")
+            desc = "；".join(segs)
+            if len(desc) > 200:
+                desc = "；".join(segs[:3]) + f" 等{len(ba)}条"
             line = f"> 聚合分析 {len(ba)} 条报警：{desc}"
             if parsed and parsed.get("app"):
                 line += f"｜{parsed['app']}"
