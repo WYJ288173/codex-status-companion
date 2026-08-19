@@ -116,4 +116,11 @@ check("提示词要求批量汇总句式",
       "聚合批分析" in PROMPT_TEMPLATE and "累计 M 次" in PROMPT_TEMPLATE
       and "严禁逐条复述" in PROMPT_TEMPLATE)
 
+# ---------- 5. 应用名解析不把发送方 publish 当 app ----------
+from localagent.matcher import parse_sunfire_alert
+REAL = ("2026/08/19 00:17\npublish\n华扬\nchange-flight-tp\n改签底座-验价指标\n失败量\n"
+        "共有1条数据触发[warning]报警，摘要：\n* [国际,-] 失败数 [当前值为: 6]\n")
+check("发送方publish不误识别为应用名", parse_sunfire_alert(REAL)["app"] == "change-flight-tp",
+      str(parse_sunfire_alert(REAL).get("app")))
+
 print(f"\n{sum(1 for _, ok in PASS if ok)}/{len(PASS)} passed")

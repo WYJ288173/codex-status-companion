@@ -49,9 +49,13 @@ def parse_sunfire_alert(text):
     low = text.lower()
     severity = "P1" if "critical" in low else ("P2" if "warning" in low else "P3")
     app = None
-    for cand in re.findall(r"^[a-z][a-z0-9-]{2,}$", text, re.M):
-        app = cand
-        break
+    cands = re.findall(r"^[a-z][a-z0-9-]{2,}$", text, re.M)
+    # 优先带连字符的标准应用名（如 change-flight-tp），避免把 publish 等发送方名当应用
+    hy = [c for c in cands if "-" in c]
+    if hy:
+        app = hy[0]
+    elif cands:
+        app = cands[0]
     if not app:
         m_app = re.search(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\b", text)
         app = m_app.group(1) if m_app else None
