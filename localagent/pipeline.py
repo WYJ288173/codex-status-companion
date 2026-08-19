@@ -354,7 +354,24 @@ class Pipeline:
                       status="no_problem", created_at=now(), acked_at=None,
                       ignore_until=None, reopen_at=None)
             recv_n = min(it["arrived_at"] for it in items) if batched else now()
-            self._reply_normal(msg["group"], result, run_id, text, received_at=recv_n)
+            # 无问题结论同样先过 Reply Risk Gate：低风险场景（答疑/恢复）带 A 档证据时
+            # 自动回复完整结论+依据；门禁未通过时回退到简短确认流程
+            ctx_n = {"trigger": trigger, "at_me": trigger == "dingtalk_at_me",
+                     "audit_parsed": audit_parsed}
+            g = self._gate_evaluate(msg["group"], result, run_id, text, recv_n, ctx_n)
+            sent = False
+            if g and g["gate"]["reply_decision"] == "auto_reply":
+                md = self._identity_header(result, text, recv_n) + g["gate"]["reply_markdown"]
+                certain, _why = self._certain_reply(result, md)
+                if certain and self.ding.reply(msg["group"], md):
+                    self.db.insert("auth_exec", entry_id=g["entry"]["id"], run_id=run_id,
+                                   action_type="message_write", matched=1, reject_reason="",
+                                   exec_result="replied", ts=now())
+                    self.db.audit("dingtalk", "reply_auto", msg["group"],
+                                  f"normal；{g['gate_brief']}", run_id)
+                    sent = True
+            if not sent:
+                self._reply_normal(msg["group"], result, run_id, text, received_at=recv_n)
         else:
             db.update("runs", "run_id", run_id, status="success", finished_at=now(),
                       engine=eng, engine_version=ver)
@@ -627,24 +644,36 @@ class Pipeline:
         except Exception:
             pass
 
-    def _reply_if_allowed(self, group, result, run_id, source_text="", received_at="", ctx=None):
-        """结论回复统一经 Reply Risk Gate：群级 auto_reply 只是外层放行条件，不能绕过门禁。"""
+    def _gate_evaluate(self, group, result, run_id, source_text="", received_at="", ctx=None):
+        """Reply Risk Gate 评估：校验写条目、计算外层放行、执行门禁决策并回写 result/报告。
+        返回 {gate, entry, gate_meta, type_tag, gate_brief}；不可回复场景返回 None。"""
         from . import correlate as corrmod
         from . import reply_policy as rp
         key = corrmod.family_key(source_text)
         alert_type = key.split(":", 1)[1] if key and key.startswith("kw:") else None
         if not self.cfg.dingtalk.get("reply_enabled", True):
             self.db.audit("dingtalk", "reply_skipped", group, "reply_enabled=false")
-            return
+            return None
         entry = authlist.find_entry(self.cfg.auth_entries, "dingtalk", "write", "回复分析结论到值班群")
         if entry is None or group not in entry.get("constraints", {}).get("groups", []):
             self.db.insert("auth_exec", entry_id="dingtalk-write-reply", run_id=run_id,
                            action_type="message_write", matched=0,
                            reject_reason="no enabled entry or group not allowed",
                            exec_result="skipped", ts=now())
-            return
+            return None
         policy = getattr(self.cfg, "reply_policy", None) or rp.default_policy()
         group_auto = self._group_auto_reply(group, alert_type)
+        # 无家族关键词的低风险场景（监控恢复/答疑/历史重复）：群已配置自动回复白名单
+        # 即视为外层放行，仍须通过门禁全部硬规则（A 档证据/风险标记/场景白名单）
+        if not group_auto:
+            scenario_pre = rp.classify_scenario(result, source_text, ctx or {})
+            allowed_scn = (policy.get("auto_reply", {}) or {}).get(
+                "allowed_scenarios", [rp.SCN_LOW_RISK_QA, rp.SCN_MONITOR_RECOVERED,
+                                      rp.SCN_HISTORY_DUPLICATE])
+            if scenario_pre in allowed_scn and any(
+                    g.get("name") == group and (g.get("auto_reply_types") or [])
+                    for g in self.cfg.groups):
+                group_auto = True
         gate = rp.decide(policy, result, source_text, ctx=ctx or {},
                          group_auto=group_auto, reply_enabled=True)
         # 决策回写 result 与报告 JSON，保证每次处理可回溯
@@ -659,9 +688,18 @@ class Pipeline:
                      "reply_decision": gate["reply_decision"],
                      "reply_reason": gate["reply_reason"]}
         self._patch_report_meta(run_id, gate_meta)
-        type_tag = alert_type or "unclassified"
         gate_brief = (f"gate={gate['reply_decision']}"
                       f"（{gate['reply_reason']}；markers={','.join(gate['risk_markers']) or '无'}）")
+        return {"gate": gate, "entry": entry, "gate_meta": gate_meta,
+                "type_tag": alert_type or "unclassified", "gate_brief": gate_brief}
+
+    def _reply_if_allowed(self, group, result, run_id, source_text="", received_at="", ctx=None):
+        """结论回复统一经 Reply Risk Gate：群级 auto_reply 只是外层放行条件，不能绕过门禁。"""
+        g = self._gate_evaluate(group, result, run_id, source_text, received_at, ctx)
+        if g is None:
+            return
+        gate, entry = g["gate"], g["entry"]
+        type_tag, gate_brief, gate_meta = g["type_tag"], g["gate_brief"], g["gate_meta"]
 
         if gate["reply_decision"] == "no_reply":
             self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,

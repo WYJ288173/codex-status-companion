@@ -135,9 +135,13 @@ def _mock_analyze(ctx_text, source):
                              "action_type": "data_correction",
                              "params": {"modifyId": "91234567890", "subStatus": "TO_BE_CONFIRMED"}}],
         }
-    return {"normal": True, "summary": "分析完成，未发现异常",
-            "conclusion": "经核对上下文无异常指标与错误日志，判定无问题。",
-            "evidence": [{"action": "mock 上下文核对", "finding": "无报警指标/错误日志命中"}],
+    return {"normal": True,
+            "summary": "分析完成，未发现异常",
+            "conclusion": "【域内问题】经核对上下文无异常指标与错误日志，判定无问题。",
+            "evidence": [{"action": "mock 上下文核对", "finding": "无报警指标/错误日志命中",
+                          "source_type": "code",
+                          "source_ref": "change-flight-tp/src/main/java/com/mock/MockService.java:10",
+                          "strength": "A"}],
             "anomalies": [], "suggestions": []}
 
 

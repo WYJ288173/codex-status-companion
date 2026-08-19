@@ -121,6 +121,31 @@ check("灰度关闭（enabled=false）一律 pending",
       rp.decide(rp.default_policy(), qa_result(), QA_TEXT, ctx=CTX_QA,
                 group_auto=True)["reply_decision"] == "pending_confirm")
 
+# ---------- 2b. Goal 补充场景 ----------
+dup_res = qa_result(correlation={"same_order": True, "count": 3, "orders": ["9985903664559"],
+                                 "type_key": "kw:验价", "window_min": 30},
+                    evidence=[{"action": "引用历史报告",
+                               "finding": "与 run-4c0abc3ea6c9 同根因，结论可复用",
+                               "source_ref": "run-4c0abc3ea6c9"}])
+d = rp.decide(POLICY_ON, dup_res, "@LocalAgent 验价又失败了", ctx=CTX_QA, group_auto=True)
+check("history_duplicate + 历史报告 run_id 证据 → auto_reply",
+      d["scenario_type"] == "history_duplicate" and d["reply_decision"] == "auto_reply",
+      f"{d['scenario_type']}/{d['reply_decision']}（{d['reply_reason']}）")
+
+b_res = qa_result(evidence=[{"action": "看了一眼日志", "finding": "像是上游返回失败（无具体出处）"}])
+d = rp.decide(POLICY_ON, b_res, QA_TEXT, ctx=CTX_QA, group_auto=True)
+check("非 A 档（仅B档）evidence → pending_confirm",
+      d["reply_decision"] == "pending_confirm" and d["evidence_grade"] == "B",
+      f"{d['evidence_grade']}（{d['reply_reason']}）")
+
+w_res = qa_result(suggestions=[{"app": "change-flight-tp", "feature": "兼容修复",
+                                "action_type": "tech_requirement", "action": "提技术需求修复",
+                                "params": {}}])
+d = rp.decide(POLICY_ON, w_res, QA_TEXT, ctx=CTX_QA, group_auto=True)
+check("needs_write（suggestions 写动作）→ pending_confirm",
+      d["reply_decision"] == "pending_confirm" and "needs_write" in d["risk_markers"],
+      d["reply_reason"])
+
 # ---------- 3. Pipeline 接入：群级白名单不能绕过门禁 ----------
 ws = tempfile.mkdtemp()
 db = DB(os.path.join(ws, "t.sqlite"))
