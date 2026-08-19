@@ -10,6 +10,7 @@ dingtalk:
   webhook_secret: ''
   listen_all: true
   owner_name: 华扬
+  reply_on_normal: true
 engines:
   default: qodercli
   fallback:

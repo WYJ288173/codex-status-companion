@@ -352,6 +352,8 @@ class Pipeline:
                       summary=result.get("summary", ""), detail="",
                       status="no_problem", created_at=now(), acked_at=None,
                       ignore_until=None, reopen_at=None)
+            recv_n = min(it["arrived_at"] for it in items) if batched else now()
+            self._reply_normal(msg["group"], result, run_id, text, received_at=recv_n)
         else:
             db.update("runs", "run_id", run_id, status="success", finished_at=now(),
                       engine=eng, engine_version=ver)
@@ -522,9 +524,8 @@ class Pipeline:
                 "steps": [{"id": s["id"], "entry": s["entry_id"],
                            "result": s["exec_result"]} for s in steps]}
 
-    def _build_reply_markdown(self, result, source_text="", received_at=""):
-        """回复卡片：头部带报警身份（规则名/预警时间/采集时间/app），聚合批一行列出全部报警；
-        全文单行距不留空行；历史关联统计条目标注 [历史关联]。"""
+    def _identity_header(self, result, source_text="", received_at=""):
+        """回复卡片头部：报警身份（规则名/预警时间/采集时间/app），聚合批按规则计数收敛。"""
         md = "**LocalAgent 分析结论（仅供参考）**\n"
         parsed = parse_sunfire_alert(source_text) if source_text else None
         ba = result.get("batch_alerts") or []
@@ -565,12 +566,24 @@ class Pipeline:
                 t_parts.append(f"采集 {received_at[5:16].replace('T', ' ')}")
             if t_parts:
                 md += "> " + "｜".join(t_parts) + "\n"
+        return md
+
+    def _build_reply_markdown(self, result, source_text="", received_at=""):
+        """异常结论回复卡片：身份头 + summary + 异常明细；全文单行距不留空行；
+        历史关联统计条目标注 [历史关联]。"""
+        md = self._identity_header(result, source_text, received_at)
         md += result.get("summary", "")
         for a in result.get("anomalies", []):
             s = (a.get("summary") or "").strip()
             if any(k in s for k in HISTORY_MARKERS) and not s.startswith("[历史关联]"):
                 s = "[历史关联] " + s
             md += f"\n- [{a.get('severity')}] {s}"
+        return md
+
+    def _build_normal_markdown(self, result, source_text="", received_at=""):
+        """无问题结论的简短确认回复：身份头 + 已确认…无需处理。"""
+        md = self._identity_header(result, source_text, received_at)
+        md += f"已确认：{result.get('summary', '无异常')}，无需处理"
         return md
 
     @staticmethod
@@ -646,6 +659,38 @@ class Pipeline:
                                           ensure_ascii=False))
         self.db.audit("dingtalk", "reply_pending", group,
                       f"alert_type={type_tag}", run_id)
+
+    def _reply_normal(self, group, result, run_id, source_text="", received_at=""):
+        """无问题结论自动回群简短确认（reply_on_normal 开关，默认开）；
+        发送失败转 pending_reply 供人工补发。"""
+        if not self.cfg.dingtalk.get("reply_enabled", True):
+            return
+        if not self.cfg.dingtalk.get("reply_on_normal", True):
+            self.db.audit("dingtalk", "reply_normal_skipped", group, "reply_on_normal=false", run_id)
+            return
+        entry = authlist.find_entry(self.cfg.auth_entries, "dingtalk", "write", "回复分析结论到值班群")
+        if entry is None or group not in entry.get("constraints", {}).get("groups", []):
+            self.db.insert("auth_exec", entry_id="dingtalk-write-reply", run_id=run_id,
+                           action_type="message_write", matched=0,
+                           reject_reason="no enabled entry or group not allowed",
+                           exec_result="skipped", ts=now())
+            return
+        md = self._build_normal_markdown(result, source_text, received_at)
+        if self.ding.reply(group, md):
+            self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
+                           action_type="message_write", matched=1, reject_reason="",
+                           exec_result="replied", ts=now())
+            self.db.audit("dingtalk", "reply_auto_normal", group, "", run_id)
+            return
+        self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
+                       action_type="message_write", matched=1,
+                       reject_reason="awaiting manual send (normal confirm)",
+                       exec_result="pending_reply", ts=now(),
+                       payload=json.dumps({"group": group, "markdown": md,
+                                           "run_id": run_id, "alert_type": "normal",
+                                           "summary": result.get("summary", ""),
+                                           "anomalies": []}, ensure_ascii=False))
+        self.db.audit("dingtalk", "reply_normal_failed", group, "自动发送失败转人工", run_id)
 
     def send_reply(self, exec_id):
         """手动发送待回复；返回 (run_id, ok)。发送失败保持 pending_reply 可重试。"""
