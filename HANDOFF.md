@@ -141,3 +141,40 @@
   自动重排队中断批分析为待评估优化项（用户未批准实施）。
 - 关键配置（workspace/config/agent.yaml）：notify.aggregate_minutes=5、
   notify.stale_delivery_minutes 默认 60、dingtalk.reply_on_normal=true。
+
+# 交接存档追加（2026-08-19 · Reply Risk Gate）
+
+## 已交付（按《休假值守自治能力 Goal 校验报告》§8 完成阶段 1-3，测试全过，已推送）
+
+1. 【P0-1 新增模块】localagent/reply_policy.py：独立 Reply Risk Gate。
+   - 场景分类：low_risk_qa / monitor_recovered / history_duplicate / monitor_anomaly /
+     audit_solution / unknown；
+   - 风险标记：has_order_id / has_modify_id / has_refund_id / has_trace_id / has_amount /
+     has_audit_loss_risk / needs_write / needs_external_attribution / batch_impact /
+     tool_failed / evidence_missing / unknown_scope；
+   - 证据分级：代码路径/语雀链接/历史报告 run_id → A 档，仅 action/finding → B 档，
+     监控恢复原文可推导 A 档（§8.2）；
+   - 决策：auto_reply / pending_confirm / no_reply，输出 reply_reason 可回溯。
+2. 【P0-3 配置】workspace/config/reply_policy.yaml：白名单场景=low_risk_qa/
+   monitor_recovered/history_duplicate；require_evidence_strength=A；
+   require_evidence_in_reply=true；12 个阻断标记。**当前 enabled=false 灰度保守态：
+   所有结论回复一律转待确认**；验收通过后可对低风险场景开启。
+3. 【P0-2 Pipeline 接入】_reply_if_allowed 重写：群级 auto_reply/auto_reply_types
+   仅作外层放行条件，不能绕过门禁；门禁通过后再过确定性门禁（UNCERTAIN_MARKERS）；
+   自动回复使用「结论+依据 source_ref+免责」短模板并带报警身份头；
+   待确认草稿 payload 带 gate（决策/原因/markers/证据等级）。
+4. 【P0-4 决策落盘】reply_decision/reply_reason/risk_markers/scenario_type/
+   evidence_grade 写回报告 JSON 侧车（_patch_report_meta）与审计（reply_pending/
+   reply_auto/reply_no_reply 均带 gate 摘要）。
+5. 【配套】_reply_normal 增加资损类守卫：has_amount/has_audit_loss_risk/needs_write/
+   needs_external_attribution 命中时不自动发「无问题确认」（reply_normal_blocked 审计）。
+6. 【测试】新增 test_v12_reply_risk_gate.py（24 项，覆盖 §8.9 全部 12 用例+接入断言）；
+   v1/v6 旧自动回复语义断言更新到门禁语义。
+
+## 备注（Reply Risk Gate）
+- 对照 §8.10 验收：群级配置不能绕过门禁✓、无 A 档证据不自动✓、自动回复必带依据✓、
+  高风险标记转待确认✓、报告/payload 可见决策✓、全套回归通过✓。
+- 阶段 4（P1）未实施：低风险答疑语雀/代码只读 evidence 收集链路、50-100 条真实回放集。
+- 开启路径：验收后将 reply_policy.yaml 的 auto_reply.enabled 置 true，
+  仅 low_risk_qa/monitor_recovered/history_duplicate 场景可能自动回复，
+  监控异常/审计/写操作场景永远待确认。

@@ -173,19 +173,21 @@ check("auto_reply=true 无白名单 → 不自动回复", len(rd2.calls) == 0, s
 pr2 = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply2' AND exec_result='pending_reply'")
 check("auto_reply=true 无白名单 → pending_reply", pr2 is not None, str(pr2))
 
-# 9b. 群×报警类型维度自动回复
+# 9b. 群×报警类型维度自动回复（Reply Risk Gate：白名单只是外层条件，灰度未开启一律转人工）
 ReplyCfg.groups = [{"name": "test-group", "auto_reply": False, "auto_reply_types": ["验价"]}]
 rd4 = ReplyDing()
 rp4 = Pipeline(ReplyCfg(), db, n, rd4)
 rp4._reply_if_allowed("test-group", result2, "run-reply4", source_text="改签验价失败率下跌报警")
-check("命中放开类型 → 自动回复", len(rd4.calls) == 1, str(rd4.calls))
+check("命中放开类型但门禁灰度未开启 → 不自动回复", len(rd4.calls) == 0, str(rd4.calls))
+pr4 = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply4' AND exec_result='pending_reply'")
+check("命中放开类型但门禁拦截 → pending_reply", pr4 is not None, str(pr4))
 rp4._reply_if_allowed("test-group", result2, "run-reply5", source_text="预订流程异常报警")
-check("未命中类型 → 不自动回复", len(rd4.calls) == 1, str(rd4.calls))
+check("未命中类型 → 不自动回复", len(rd4.calls) == 0, str(rd4.calls))
 pr5 = db.one("SELECT * FROM auth_exec WHERE run_id='run-reply5' AND exec_result='pending_reply'")
 check("未命中类型 → pending_reply", pr5 is not None, str(pr5))
 rp4._reply_if_allowed("test-group", result2, "run-reply6", source_text="无家族关键词的报警")
 check("未分类报警 → 不自动回复转人工",
-      len(rd4.calls) == 1
+      len(rd4.calls) == 0
       and db.one("SELECT * FROM auth_exec WHERE run_id='run-reply6' AND exec_result='pending_reply'") is not None)
 ReplyCfg.groups = [{"name": "test-group", "auto_reply": True}]
 

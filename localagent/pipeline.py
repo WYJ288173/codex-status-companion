@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 
 from . import authlist, correlate, engine, reports
 from . import solutions as solmod
@@ -360,7 +361,10 @@ class Pipeline:
             self.notifier.raise_alerts(run_id, msg["group"], result.get("anomalies", []))
             # 批回复的「采集」取批内最早到达时间（真实采集时刻），而非分析完成时刻
             recv = min(it["arrived_at"] for it in items) if batched else now()
-            self._reply_if_allowed(msg["group"], result, run_id, text, received_at=recv)
+            self._reply_if_allowed(msg["group"], result, run_id, text, received_at=recv,
+                                   ctx={"trigger": trigger,
+                                        "at_me": trigger == "dingtalk_at_me",
+                                        "audit_parsed": audit_parsed})
         out = {"handled": True, "run_id": run_id, "normal": result.get("normal")}
         if batched:
             out["batch_size"] = len(items)
@@ -607,8 +611,26 @@ class Pipeline:
                 return bool(alert_type) and alert_type in types
         return False
 
-    def _reply_if_allowed(self, group, result, run_id, source_text="", received_at=""):
+    def _patch_report_meta(self, run_id, meta):
+        """把回复决策写回报告 JSON 侧车（reply_decision/reply_reason/risk_markers 等）。"""
+        r = self.db.one("SELECT report_path FROM runs WHERE run_id=?", run_id)
+        path = r["report_path"] if r else None
+        if not path:
+            return
+        p = os.path.join(self.cfg.workspace, path[:-3] + ".json")
+        try:
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+            data.update(meta)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    def _reply_if_allowed(self, group, result, run_id, source_text="", received_at="", ctx=None):
+        """结论回复统一经 Reply Risk Gate：群级 auto_reply 只是外层放行条件，不能绕过门禁。"""
         from . import correlate as corrmod
+        from . import reply_policy as rp
         key = corrmod.family_key(source_text)
         alert_type = key.split(":", 1)[1] if key and key.startswith("kw:") else None
         if not self.cfg.dingtalk.get("reply_enabled", True):
@@ -621,44 +643,78 @@ class Pipeline:
                            reject_reason="no enabled entry or group not allowed",
                            exec_result="skipped", ts=now())
             return
-        md = self._build_reply_markdown(result, source_text, received_at)
+        policy = getattr(self.cfg, "reply_policy", None) or rp.default_policy()
+        group_auto = self._group_auto_reply(group, alert_type)
+        gate = rp.decide(policy, result, source_text, ctx=ctx or {},
+                         group_auto=group_auto, reply_enabled=True)
+        # 决策回写 result 与报告 JSON，保证每次处理可回溯
+        result["scenario_type"] = gate["scenario_type"]
+        result["risk_markers"] = gate["risk_markers"]
+        result["reply_decision"] = gate["reply_decision"]
+        result["reply_reason"] = gate["reply_reason"]
+        result["evidence"] = gate["evidence"]
+        gate_meta = {"scenario_type": gate["scenario_type"],
+                     "risk_markers": gate["risk_markers"],
+                     "evidence_grade": gate["evidence_grade"],
+                     "reply_decision": gate["reply_decision"],
+                     "reply_reason": gate["reply_reason"]}
+        self._patch_report_meta(run_id, gate_meta)
         type_tag = alert_type or "unclassified"
-        if self._group_auto_reply(group, alert_type):
+        gate_brief = (f"gate={gate['reply_decision']}"
+                      f"（{gate['reply_reason']}；markers={','.join(gate['risk_markers']) or '无'}）")
+
+        if gate["reply_decision"] == "no_reply":
+            self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
+                           action_type="message_write", matched=1,
+                           reject_reason=f"no_reply：{gate['reply_reason']}",
+                           exec_result="skipped", ts=now())
+            self.db.audit("dingtalk", "reply_no_reply", group, gate_brief, run_id)
+            return
+
+        if gate["reply_decision"] == "auto_reply":
+            md = self._identity_header(result, source_text, received_at) + gate["reply_markdown"]
             certain, why = self._certain_reply(result, md)
-            if not certain:
-                # 不确定结论禁止自动回复：转人工卡片并标注拦截原因
-                self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
-                               action_type="message_write", matched=1,
-                               reject_reason=f"自动回复被拦截：{why}，请人工审核",
-                               exec_result="pending_reply", ts=now(),
-                               payload=json.dumps({"group": group, "markdown": md,
-                                                   "run_id": run_id,
-                                                   "alert_type": type_tag,
-                                                   "summary": result.get("summary", ""),
-                                                   "anomalies": result.get("anomalies", [])},
-                                                  ensure_ascii=False))
-                self.db.audit("dingtalk", "reply_auto_blocked", group, why, run_id)
-                return
-            if self.ding.reply(group, md):
+            if certain and self.ding.reply(group, md):
                 self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
                                action_type="message_write", matched=1, reject_reason="",
                                exec_result="replied", ts=now())
-                self.db.audit("dingtalk", "reply_auto", group, f"alert_type={type_tag}", run_id)
+                self.db.audit("dingtalk", "reply_auto", group,
+                              f"alert_type={type_tag}；{gate_brief}", run_id)
                 return
-            self.db.audit("dingtalk", "reply_auto_failed", group,
-                          f"alert_type={type_tag}，自动发送失败转人工", run_id)
+            if not certain:
+                reason = f"门禁通过但确定性门禁拦截：{why}"
+                self.db.audit("dingtalk", "reply_auto_blocked", group, reason, run_id)
+            else:
+                reason = "门禁通过但自动发送失败转人工"
+                self.db.audit("dingtalk", "reply_auto_failed", group,
+                              f"alert_type={type_tag}", run_id)
+            self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
+                           action_type="message_write", matched=1,
+                           reject_reason=f"自动回复被拦截：{reason}，请人工审核",
+                           exec_result="pending_reply", ts=now(),
+                           payload=json.dumps({"group": group,
+                                               "markdown": self._build_reply_markdown(
+                                                   result, source_text, received_at),
+                                               "run_id": run_id, "alert_type": type_tag,
+                                               "summary": result.get("summary", ""),
+                                               "anomalies": result.get("anomalies", []),
+                                               "gate": gate_meta}, ensure_ascii=False))
+            return
+
+        # pending_confirm：生成待确认草稿，payload 带门禁结果与拦截原因
+        md_rich = self._build_reply_markdown(result, source_text, received_at)
         self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
                        action_type="message_write", matched=1,
-                       reject_reason=f"awaiting manual send (alert_type={type_tag})",
+                       reject_reason=f"awaiting manual send (alert_type={type_tag})；"
+                                     f"{gate['reply_reason']}",
                        exec_result="pending_reply", ts=now(),
-                       payload=json.dumps({"group": group, "markdown": md,
-                                           "run_id": run_id,
-                                           "alert_type": type_tag,
+                       payload=json.dumps({"group": group, "markdown": md_rich,
+                                           "run_id": run_id, "alert_type": type_tag,
                                            "summary": result.get("summary", ""),
-                                           "anomalies": result.get("anomalies", [])},
-                                          ensure_ascii=False))
+                                           "anomalies": result.get("anomalies", []),
+                                           "gate": gate_meta}, ensure_ascii=False))
         self.db.audit("dingtalk", "reply_pending", group,
-                      f"alert_type={type_tag}", run_id)
+                      f"alert_type={type_tag}；{gate_brief}", run_id)
 
     def _reply_normal(self, group, result, run_id, source_text="", received_at=""):
         """无问题结论自动回群简短确认（reply_on_normal 开关，默认开）；
@@ -667,6 +723,15 @@ class Pipeline:
             return
         if not self.cfg.dingtalk.get("reply_on_normal", True):
             self.db.audit("dingtalk", "reply_normal_skipped", group, "reply_on_normal=false", run_id)
+            return
+        # 资损/写操作/归因类场景即使是"无问题"结论也不自动确认，保留人工视角
+        from . import reply_policy as rp
+        markers = rp.detect_risk_markers(result, source_text, {})
+        blocked = {"has_amount", "has_audit_loss_risk", "needs_write",
+                   "needs_external_attribution"} & set(markers)
+        if blocked:
+            self.db.audit("dingtalk", "reply_normal_blocked", group,
+                          ",".join(sorted(blocked)), run_id)
             return
         entry = authlist.find_entry(self.cfg.auth_entries, "dingtalk", "write", "回复分析结论到值班群")
         if entry is None or group not in entry.get("constraints", {}).get("groups", []):

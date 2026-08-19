@@ -163,24 +163,29 @@ del GateCfg.groups[0]["auto_reply"]
 check("未配置类型不自动", p._group_auto_reply("g1", "验价") is False)
 check("未配置群不自动", p._group_auto_reply("gX", "验价") is False)
 
-# ---------- 4. 自动回复失败转人工 + payload 带 alert_type ----------
+# ---------- 4. Reply Risk Gate：灰度未开启一律转待确认，决策可回溯 ----------
 GateCfg.groups[0]["auto_reply_types"] = ["验价"]
 p_fail = Pipeline(GateCfg(), db, notifier, OkDing(ok=False))
-p_fail._reply_if_allowed("g1", result, "run-v6-auto-fail", source_text="验价失败报警")
+p_fail._reply_if_allowed("g1", dict(result), "run-v6-auto-fail", source_text="验价失败报警")
 row_af = db.one("SELECT * FROM auth_exec WHERE run_id='run-v6-auto-fail'")
-check("自动发送失败转 pending_reply", row_af["exec_result"] == "pending_reply", row_af["exec_result"])
-check("自动失败留 reply_auto_failed 审计",
-      db.one("SELECT 1 FROM audit_logs WHERE action='reply_auto_failed' AND run_id='run-v6-auto-fail'") is not None)
+check("门禁灰度未开启转 pending_reply", row_af["exec_result"] == "pending_reply", row_af["exec_result"])
+check("待确认审计带门禁原因",
+      db.one("SELECT 1 FROM audit_logs WHERE action='reply_pending' AND run_id='run-v6-auto-fail'") is not None)
 pl_af = json.loads(row_af["payload"])
 check("payload 带 alert_type", pl_af.get("alert_type") == "验价", str(pl_af.get("alert_type")))
+check("payload 带门禁决策", pl_af.get("gate", {}).get("reply_decision") == "pending_confirm",
+      str(pl_af.get("gate")))
+check("外部归因风险标记被识别",
+      "needs_external_attribution" in pl_af.get("gate", {}).get("risk_markers", []),
+      str(pl_af.get("gate", {}).get("risk_markers")))
 
 GateCfg.groups[0]["auto_reply_types"] = ["验价", "验座"]
-p_ok = Pipeline(GateCfg(), db, notifier, OkDing(ok=True))
-p_ok._reply_if_allowed("g1", result, "run-v6-auto-ok", source_text="验座失败报警")
+ding_ok = OkDing(ok=True)
+p_ok = Pipeline(GateCfg(), db, notifier, ding_ok)
+p_ok._reply_if_allowed("g1", dict(result), "run-v6-auto-ok", source_text="验座失败报警")
 row_ao = db.one("SELECT * FROM auth_exec WHERE run_id='run-v6-auto-ok'")
-check("白名单命中且发送成功 → replied", row_ao["exec_result"] == "replied", row_ao["exec_result"])
-check("自动成功留 reply_auto 审计",
-      db.one("SELECT 1 FROM audit_logs WHERE action='reply_auto' AND run_id='run-v6-auto-ok'") is not None)
+check("门禁未通过不触发钉群发送", len(ding_ok.calls) == 0, str(ding_ok.calls))
+check("白名单命中但门禁拦截仍转待确认", row_ao["exec_result"] == "pending_reply", row_ao["exec_result"])
 
 # ---------- 5. 前端与页面源码断言 ----------
 src = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "webapp.py"),
@@ -299,6 +304,15 @@ class _GateCfg:
                      "constraints": {"groups": ["改签底座质量监控"]}, "enabled": True}]
     groups = [{"name": "改签底座质量监控", "auto_reply_types": ["预订"]}]
     mock = True
+    reply_policy = None
+
+
+from localagent import reply_policy as _rp
+_pol = _rp.default_policy()
+_pol["auto_reply"]["enabled"] = True
+_GateCfg.reply_policy = _pol
+_A_CODE = [{"action": "本机源码核实",
+            "finding": "change-flight-tp/src/main/java/com/x/CreateService.java:10 按设计拦截"}]
 
 
 class _GateDing:
@@ -314,8 +328,10 @@ n = Notifier(_GateCfg(), db)
 _gp = PL2(_GateCfg(), db, n, _gd)
 _gp._reply_if_allowed("改签底座质量监控",
                       {"conclusion": "【归因待定】trace日志和外部返回未取到",
-                       "summary": "预订失败重试，归因待定", "anomalies": []},
-                      "run-gate-blocked", source_text="改签底座-改签预定指标 预警时间: 2026-08-18 08:44")
+                       "summary": "预订失败重试，归因待定", "anomalies": [],
+                       "evidence": [dict(_A_CODE[0])]},
+                      "run-gate-blocked", source_text="@LocalAgent 预订失败帮我看下",
+                      ctx={"at_me": True, "trigger": "dingtalk_at_me"})
 check("不确定结论自动回复被拦截（不调 ding）", len(_gd.calls) == 0, str(_gd.calls))
 _blk = db.one("SELECT * FROM auth_exec WHERE run_id='run-gate-blocked'")
 check("拦截后转人工卡片", _blk is not None and _blk["exec_result"] == "pending_reply"
@@ -324,9 +340,11 @@ check("拦截留 reply_auto_blocked 审计",
       db.one("SELECT 1 FROM audit_logs WHERE action='reply_auto_blocked' "
              "AND run_id='run-gate-blocked'") is not None)
 _gp._reply_if_allowed("改签底座质量监控",
-                      {"conclusion": "【外部域问题】渠道占座失败，确定性根因",
-                       "summary": "外部渠道占座失败", "anomalies": []},
-                      "run-gate-pass", source_text="改签底座-改签预定指标 预警时间: 2026-08-18 08:47")
+                      {"conclusion": "【域内问题】业务规则拦截，非缺陷",
+                       "summary": "预订被业务规则拦截", "anomalies": [],
+                       "evidence": [dict(_A_CODE[0])]},
+                      "run-gate-pass", source_text="@LocalAgent 预订失败帮我看下",
+                      ctx={"at_me": True, "trigger": "dingtalk_at_me"})
 check("确定结论自动回复放行", len(_gd.calls) == 1, str(_gd.calls))
 
 dingsrc2 = open(os.path.join(os.path.dirname(__file__), "..", "localagent", "dingtalk.py"),

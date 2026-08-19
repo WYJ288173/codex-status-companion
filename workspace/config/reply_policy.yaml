@@ -1,0 +1,25 @@
+# Reply Risk Gate 策略（方案 §8.7）
+# enabled=false 为灰度保守态：所有结论回复一律转待确认，不自动发群。
+# 阶段测试通过后，可对低风险场景开启 enabled=true；
+# 审计、异常报警、写操作相关场景永远不进入白名单。
+auto_reply:
+  enabled: false
+  allowed_scenarios:
+    - low_risk_qa
+    - monitor_recovered
+    - history_duplicate
+  require_evidence_strength: A
+  require_evidence_in_reply: true
+  block_risk_markers:
+    - has_order_id
+    - has_modify_id
+    - has_refund_id
+    - has_trace_id
+    - has_amount
+    - has_audit_loss_risk
+    - needs_write
+    - needs_external_attribution
+    - batch_impact
+    - tool_failed
+    - evidence_missing
+    - unknown_scope

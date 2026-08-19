@@ -46,6 +46,12 @@ class Config:
         return self.agent.get("notify", {})
 
     @property
+    def reply_policy(self):
+        from . import reply_policy as rp
+        p = self._load("config/reply_policy.yaml", None)
+        return p if p is not None else rp.default_policy()
+
+    @property
     def web(self):
         return self.agent.get("web", {"host": "127.0.0.1", "port": 8765})
 
