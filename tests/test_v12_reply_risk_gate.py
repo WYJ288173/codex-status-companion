@@ -177,4 +177,13 @@ check("待确认 payload 带门禁结果与原因",
       and "has_order_id" in pl.get("gate", {}).get("risk_markers", []), str(pl.get("gate")))
 check("拦截后未额外发群", len(ding.calls) == 1, str(len(ding.calls)))
 
+# ---------- 4. 引擎提示词：证据结构化与答疑取证要求 ----------
+from localagent.engine import PROMPT_TEMPLATE
+check("提示词要求证据结构化 source_type/source_ref/strength",
+      "source_type" in PROMPT_TEMPLATE and "source_ref" in PROMPT_TEMPLATE
+      and "strength" in PROMPT_TEMPLATE)
+check("提示词要求答疑类只读语雀/代码取证",
+      "只读取证" in PROMPT_TEMPLATE and "source_type=yuque|code" in PROMPT_TEMPLATE)
+check("提示词格式仍合法", bool(PROMPT_TEMPLATE.format(context="x")))
+
 print(f"\n{sum(1 for _, ok in PASS if ok)}/{len(PASS)} passed")

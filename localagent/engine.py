@@ -39,6 +39,7 @@ P4 未取证兜底：若记忆、skill、MCP 全部不可用，必须在 evidenc
 5. 基于取证给出明确结论：是什么问题 / 排除了什么，依据是什么；某项取证失败时如实记录失败原因（参数错误/服务异常），并给出还需查什么。
 6. 上下文含 traceId（鹰眼ID）或订单号时，必须先完成 flyeye-log-query / 订单查询取证再下结论；禁止未取证直接输出结论。
    evidence 数组必须非空：每个取证动作一条记录，含动作与关键发现；取证失败也要记录，finding 写明失败原因。
+   @我答疑类问题（规则解释/业务咨询/代码定位）：必须至少完成一条只读取证——检索语雀知识库文档或本机代码（~/developer 下相关仓库只读查找），evidence 给出 source_type=yuque|code 与可回溯 source_ref（语雀链接或 文件路径:行号），strength=A；两者都查不到时 conclusion 标注「证据不足，仅方向性解答」，禁止把常识当证据。
 7. BCP/审计播报类告警（含告警码如 TRP_xxx_ADUIT / FLIGGY_xxx_ADUIT）→ 优先用 jarvis MCP（list_audit_scripts 按 monitorIdentifier=告警码、list_audit_rules_by_script、list_audit_rule_check_points 等）深挖规则定义与校验点，再结合订单/日志 skill 取证；
    禁止用 WebFetch 抓取 bcp.alibaba-inc.com 页面（SSO 拦截，属无效取证）；上下文给出沉淀解决方案时，必须按方案步骤取证，suggestions 的 app/feature 与授权条目保持一致。
 8. 异常深挖与代码级根因（报警含 tracerId 时必须执行）：flyeye 日志命中 Java 异常（NullPointerException / TimeoutException / 业务异常等）时，不得止步于"有异常"，必须：
@@ -88,7 +89,7 @@ c. 回查不到明细时 conclusion 标注"标题报警，明细未查到"，只
 取证完成后严格只输出 JSON：
 {{"normal": bool, "conclusion": str（一句话明确结论+依据，≤60字，精炼不啰嗦）,
 "summary": str（列表展示用的极简摘要，≤30字，只说结论不谈过程；含订单号或批量提醒时可放宽到40字）,
-"evidence": [{{"action": str（排查动作，如 flyeye-log-query skill 查询 eagleEyeId=xxx）, "finding": str（关键发现/日志摘录，详细完整，含关键数值与原文摘录）}}],
+"evidence": [{{"action": str（排查动作，如 flyeye-log-query skill 查询 eagleEyeId=xxx）, "finding": str（关键发现/日志摘录，详细完整，含关键数值与原文摘录）, "source_type": str（code|yuque|report|log|monitor_raw，证据来源类型）, "source_ref": str（可回溯引用：代码 文件路径:行号 / 语雀链接 / 历史报告 run-xxx / 日志时间戳+应用名 / 报警原文）, "strength": str（A|B，可回溯到具体代码行/语雀文档/历史报告为A，仅描述性记录为B）}}],
 "anomalies": [{{"severity": "P1|P2|P3", "summary": str（≤30字精炼概括）}}],
 "suggestions": [{{"app": str（责任方：域内写应用名如 change-flight-tp；外部域写域/团队名如 行业平台/供应商渠道）, "feature": str（≤15字，问题点或修复点）, "action_type": "notify_external|tech_requirement", "action": str（一句话解决方向≤40字）, "params": {{}}}}]}}
 建议动作规范（强制）：建议动作只基于确定性结论给出解决方向，只给方向、不复述证据，每条 action ≤40 字，params 恒为空对象，禁止把日志摘录/错误详情/冗长描述塞进建议。
