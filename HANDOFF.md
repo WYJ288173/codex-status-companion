@@ -185,3 +185,36 @@
 - 开启路径：验收后将 reply_policy.yaml 的 auto_reply.enabled 置 true，
   仅 low_risk_qa/monitor_recovered/history_duplicate 场景可能自动回复，
   监控异常/审计/写操作场景永远待确认。
+
+# 交接存档追加（2026-08-20 · 钉钉消息工作台改造）
+
+## 已交付（Goal 阶段1-5，测试 476 项全过，commit 63986d3 已推送）
+
+1. 【阶段1】/replies 待回复工作台：统一展示 pending_reply（钉群/私聊徽标、场景、
+   门禁决策、风险标记、拦截原因、原始消息、异常摘要），支持编辑/发送/丢弃/
+   重新分析/查看报告；发送失败保留可重试；alerts 页面能力不退化。
+2. 【阶段2】会话模型：messages 增 conversation_type/conversation_id/reply_target
+   （ALTER TABLE 兼容旧行 NULL）；auth_exec payload 带 reply_channel/reply_target；
+   报告 JSON gate_meta 记 source_type。send_reply 按 reply_channel 分发
+   （private→reply_private，group→reply）。
+3. 【阶段3】私聊采集 Spike 结论：dws chat message list-all 可拉全量会话消息
+   （含 openMessageId/sender/senderOpenDingTalkId/openConversationId），
+   chat message send --user 可发私聊；采集开关 dingtalk.private_collect 默认 false，
+   生产未开启。
+4. 【阶段4】私聊链路：PRIVATE_WORK_KW 命中→建 run（trigger=dingtalk_private）分析
+   生成草稿进工作台；无关私聊仅记录（private_irrelevant，不建 run）；私聊强制
+   group_auto=False 永不自动回复；高风险标记（订单/金额/traceId 等）照常拦截。
+5. 【阶段5】自动回复仍由 Reply Risk Gate 硬门禁控制；生产 reply_policy.yaml
+   auto_reply.enabled=true（用户已批准灰度），白名单场景+群级 auto_reply_types
+   双重放行；私聊不在自动回复范围。
+6. 【测试】新增 tests/test_v14_workbench.py（19 项：私聊路由/会话模型/风险拦截/
+   工作台页面/编辑/发送/丢弃/群自动回复）；全量回归 v1-v14（476 项断言）+
+   acceptance + replay_risk_gate + 真实报告回归全部通过；服务重启后 /alerts、
+   /replies 均 200。
+
+## 灰度建议
+- 当前态：群低风险自动回复已灰度开启（改签底座质量监控群×[验价,验座]），
+  私聊采集未开启、私聊永不自动回复。
+- 开启私聊采集：agent.yaml 设 dingtalk.private_collect=true，先观察
+  private_irrelevant 噪音量与草稿质量 1 周。
+- 私聊自动回复暂不开放，后续单独评估。
