@@ -30,6 +30,7 @@ input,select{background:#0f1417;color:#e6edf3;border:1px solid #22303a;border-ra
 </style></head><body><header>
 <b style="color:#00c16a">●</b> <b>LocalAgent 管理页面</b>
 <a href="/">状态</a><a href="/history">历史记录</a><a href="/alerts">报警中心 {badge}</a>
+<a href="/replies">待回复工作台</a>
 <a href="/reports">报告</a><a href="/authlist">授权清单</a><a href="/solutions">方案库</a><a href="/groups">钉群配置</a><a href="/audit">审计日志</a><a href="/storage">存储管理</a>
 </header><main>{body}</main></body></html>"""
 
@@ -1006,6 +1007,92 @@ window.addEventListener('load',watchExecuting)
         _reload()
         db.audit("auth", "entry_added", e["id"], "", None)
         return {"ok": True}
+
+    @app.get("/replies", response_class=HTMLResponse)
+    def replies_workbench():
+        """待回复工作台：统一展示钉群/@我/私聊/审计播报/高风险拦截的待确认回复草稿。"""
+        from . import render as rdr
+        rows = db.q("SELECT ae.id, ae.run_id, ae.ts, ae.reject_reason, ae.payload, "
+                    "r.source_text AS run_text, r.report_path, r.trigger_type "
+                    "FROM auth_exec ae LEFT JOIN runs r ON ae.run_id=r.run_id "
+                    "WHERE ae.exec_result='pending_reply' ORDER BY ae.id DESC LIMIT 200")
+        cards = ""
+        for h in rows:
+            h = dict(h)
+            try:
+                pl = json.loads(h.get("payload") or "{}")
+            except Exception:
+                pl = {}
+            gate = pl.get("gate") or {}
+            channel = pl.get("reply_channel") or "group"
+            src_type = "私聊" if channel == "private" else "钉群"
+            src_name = pl.get("group") or ""
+            markers = ",".join(gate.get("risk_markers") or []) or "无"
+            orig = (h.get("run_text") or "").strip()
+            orig_short = orig[:220] + ("…" if len(orig) > 220 else "")
+            rp = h.get("report_path")
+            report_link = (f"<a style='color:#7ee7b0' href='/reports/view?p={rdr.esc(rp)}'>查看报告</a>"
+                           if rp else "")
+            rean = (f"<button class='gray' style='font-size:11px;padding:1px 8px' "
+                    f"onclick=\"retryFailed('{rdr.esc(h['run_id'])}')\">重新分析</button>"
+                    if h.get("run_id") else "")
+            scen = gate.get("scenario_type") or "-"
+            reason = gate.get("reply_reason") or h.get("reject_reason") or ""
+            ev = result_refs = ""
+            evd = (pl.get("anomalies") or [])
+            if evd:
+                ev = "".join(f"<div style='font-size:11px;color:#9fb3c0'>- [{rdr.esc(a.get('severity'))}] "
+                             f"{rdr.esc(a.get('summary'))}</div>" for a in evd[:5])
+            cards += (
+                f"<div style='border:1px solid #f59e0b;border-left:4px solid #f59e0b;border-radius:8px;"
+                f"padding:10px;margin-bottom:10px;background:#0f1417'>"
+                f"<div style='display:flex;gap:10px;flex-wrap:wrap;font-size:12px;align-items:center'>"
+                f"<span style='background:{'#7c3aed' if channel == 'private' else '#22303a'};"
+                f"border-radius:4px;padding:1px 8px'>{src_type}</span>"
+                f"<span style='color:#e6edf3'>{rdr.esc(src_name)}</span>"
+                f"<span style='color:#9fb3c0'>场景：{rdr.esc(scen)}</span>"
+                f"<span style='color:#9fb3c0'>门禁：{rdr.esc(gate.get('reply_decision') or '-')}</span>"
+                f"<span style='color:#f59e0b'>风险标记：{rdr.esc(markers)}</span>"
+                f"<span style='color:#9fb3c0;font-size:11px'>"
+                f"{rdr.esc((h.get('ts') or '')[5:16].replace('T', ' '))}</span></div>"
+                f"<div style='margin-top:6px;font-size:12px;color:#9fb3c0'>"
+                f"拦截原因：{rdr.esc(reason)}</div>"
+                f"<details style='margin-top:6px'><summary style='cursor:pointer;color:#9fb3c0;"
+                f"font-size:12px'>原始消息</summary><pre>{rdr.esc(orig_short)}</pre></details>"
+                f"{ev}"
+                f"<textarea id='ed_{h['id']}' rows='4' style='width:100%;margin-top:6px;background:#0f1417;"
+                f"color:#e6edf3;border:1px solid #22303a;border-radius:6px;font-size:12px'>"
+                f"{rdr.esc(pl.get('markdown', ''))}</textarea>"
+                f"<div style='margin-top:6px;display:flex;gap:8px;flex-wrap:wrap'>"
+                f"<button style='font-size:11px;padding:1px 8px' onclick='saveReply({h['id']})'>保存编辑</button>"
+                f"<button style='font-size:11px;padding:1px 8px' onclick='sendReply({h['id']})'>"
+                f"发送到{'私聊' if channel == 'private' else '钉群'}</button>"
+                f"<button class='red' style='font-size:11px;padding:1px 8px' "
+                f"onclick='rejectReply({h['id']})'>丢弃</button>"
+                f"{rean} {report_link}</div></div>")
+        js = """<script>
+async function jfetch(u,opt){const r=await fetch(u,opt);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
+async function sendReply(id){if(!confirm('确认发送回复？'))return;try{
+let j=await jfetch('/api/auth_exec/'+id+'/send_reply',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+if(j.confirm){if(!confirm(j.confirm))return;
+j=await jfetch('/api/auth_exec/'+id+'/send_reply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});}
+alert(j.result||('失败：'+(j.error||'未知错误')));location.reload()}catch(e){alert('发送失败：'+e.message)}}
+async function rejectReply(id){if(!confirm('确认丢弃该回复？'))return;try{
+const j=await jfetch('/api/auth_exec/'+id+'/reject_reply',{method:'POST'});
+alert(j.result||('失败：'+(j.error||'未知错误')));location.reload()}catch(e){alert('操作失败：'+e.message)}}
+async function saveReply(id){const t=document.getElementById('ed_'+id);try{
+const j=await jfetch('/api/auth_exec/'+id+'/edit_reply',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({markdown:t.value})});alert(j.ok?'已保存修改':'失败：'+(j.error||''))}catch(e){alert('保存失败：'+e.message)}}
+async function retryFailed(run){const note=prompt('分析哪里不准？补充你的判断/线索，将携带该输入重新触发分析：');if(note===null)return;try{
+const j=await jfetch('/api/reanalyze/'+run,{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({note:note})});
+alert(j.result||j.error||'已发起');location.reload()}catch(e){alert('操作失败：'+e.message)}}
+</script>"""
+        body = (f"<h2>待回复工作台（{len(rows)} 条待确认）</h2>"
+                f"<p style='color:#9fb3c0;font-size:12px'>统一展示钉群报警 / @我答疑 / 私聊咨询 / "
+                f"审计播报 / 高风险拦截产生的待确认回复草稿；可编辑后发送，发送失败会保留可重试。</p>"
+                + (cards or "<p style='color:#9fb3c0'>当前没有待确认的回复。</p>") + js)
+        return page(body)
 
     @app.post("/api/auth_exec/{exec_id}/confirm")
     def auth_exec_confirm(exec_id: int):

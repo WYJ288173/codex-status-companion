@@ -37,6 +37,11 @@ class MockDingTalk:
         self.db.set_state("last_reply", f"{group}: {markdown[:120]}")
         return True
 
+    def reply_private(self, user_id, markdown):
+        self.db.audit("dingtalk", "reply_sent_private", f"private:{user_id}", markdown[:300])
+        self.db.set_state("last_reply", f"私聊:{user_id}: {markdown[:120]}")
+        return True
+
 
 class DwsDingTalk:
     """dws CLI 模式：list-mentions/list 轮询接收，chat message send 发送。"""
@@ -127,8 +132,48 @@ class DwsDingTalk:
                       data.get("result", {}).get("conversationMessagesList", [{}])[0].get("messages") or []):
                 if await self._dispatch(name, m, at_me=False):
                     hits += 1
+        if self.cfg.dingtalk.get("private_collect", False):
+            hits += await self._poll_private(start, end)
         if hits:
             self.db.set_state("dws_last_hit", f"{hits} @ {now()}")
+        return hits
+
+    async def _poll_private(self, start, end):
+        """私聊采集（spike 已验证 dws list-all 可拉全量会话消息）：
+        跳过已配置群聊会话与自己发送的消息，其余单聊消息按私聊分发。"""
+        hits = 0
+        try:
+            data = await self._dws(["chat", "message", "list-all",
+                                    "--start", _fmt_list_time(start),
+                                    "--end", _fmt_list_time(end),
+                                    "--limit", "50"])
+        except Exception as e:
+            self.db.audit("dingtalk", "private_poll_failed", "", str(e)[:200])
+            return 0
+        group_conv_ids = {g.get("id") for g in self.groups.values() if g.get("id")}
+        self_name = self.cfg.dingtalk.get("owner_name", "")
+        for conv in (data.get("result", {}).get("conversationMessagesList") or []):
+            conv_id = conv.get("openConversationId") or conv.get("conversationId") or ""
+            if conv_id and conv_id in group_conv_ids:
+                continue  # 群聊由群轮询处理
+            for m in conv.get("messages") or []:
+                sender = m.get("sender") or ""
+                if self_name and sender == self_name:
+                    continue  # 自己发的消息不采集
+                if not (m.get("senderOpenDingTalkId") or m.get("senderId")):
+                    continue  # 无发送者 ID 无法作为回复目标
+                msg = {"msg_id": m.get("openMessageId") or m.get("messageId") or "",
+                       "group": f"私聊:{sender}", "sender": sender,
+                       "text": m.get("content") or "",
+                       "msg_time": m.get("createTime") or "",
+                       "at_me": True, "conv_type": "private",
+                       "conv_id": conv_id,
+                       "reply_target": m.get("senderOpenDingTalkId") or m.get("senderId") or ""}
+                if not msg["msg_id"] or self.db.one(
+                        "SELECT 1 FROM messages WHERE msg_id=?", msg["msg_id"]):
+                    continue
+                if await self.on_message(msg):
+                    hits += 1
         return hits
 
     async def _dispatch(self, group, m, at_me):
@@ -179,6 +224,38 @@ class DwsDingTalk:
         else:
             ok = self._reply_webhook(group, text)
         self.db.set_state("last_reply", f"{group}: {text[:120]}")
+        return ok
+
+    def reply_private(self, user_id, markdown):
+        """私聊发送（spike 已验证 dws chat message send --user 可用）。失败/超时必留审计。"""
+        import subprocess
+        text = markdown[:4000]
+        if not user_id:
+            self.db.audit("dingtalk", "reply_skipped", "private", "no reply_target userId")
+            return False
+        if self.send_channel != "dws":
+            self.db.audit("dingtalk", "reply_skipped", "private", "webhook 不支持私聊")
+            return False
+        ok, err = False, ""
+        for attempt in (1, 2):
+            try:
+                r = subprocess.run(["dws", "chat", "message", "send", "--user", user_id,
+                                    "--title", "LocalAgent", "--text", text, "-y"],
+                                   capture_output=True, timeout=30)
+                if r.returncode == 0:
+                    ok = True
+                    err = (r.stdout or b"").decode()[:200]
+                    break
+                err = f"rc={r.returncode}: {(r.stderr or r.stdout or b'').decode()[:160]}"
+            except subprocess.TimeoutExpired:
+                err = "dws 私聊发送超时(30s)"
+                break
+            except Exception as e:
+                err = f"dws 私聊发送异常: {e}"[:200]
+                break
+        self.db.audit("dingtalk", "reply_sent_private" if ok else "reply_failed",
+                      f"private:{user_id}", err)
+        self.db.set_state("last_reply", f"私聊:{user_id}: {text[:100]}")
         return ok
 
     def _reply_webhook(self, group, text):

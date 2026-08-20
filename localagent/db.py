@@ -69,6 +69,12 @@ class DB:
             self.conn.execute("ALTER TABLE messages ADD COLUMN msg_time TEXT")
         except Exception:
             pass
+        # 会话模型扩展：区分群聊/私聊，记录会话与回复目标（旧行 NULL 兼容）
+        for col in ("conversation_type", "conversation_id", "reply_target"):
+            try:
+                self.conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
+            except Exception:
+                pass
         for idx, sql in [
             ("idx_runs_started", "CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at)"),
             ("idx_alerts_created", "CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at)"),

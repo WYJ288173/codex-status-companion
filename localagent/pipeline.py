@@ -91,6 +91,8 @@ class Pipeline:
         # 后台开启 listen_all 后监听处理所有告警消息（优先于群级 process_mode）。
         if not msg.get("at_me") and not bool(self.cfg.dingtalk.get("listen_all", False)):
             return {"handled": False, "reason": "non_at_me_silent"}
+        if msg.get("conv_type") == "private":
+            return await self._process_private(msg)
         # 自回复降噪：LocalAgent 自己回复到群里的结论消息被读回后不得当成新报警分析，
         # 否则会形成自我匹配、污染同类关联池并产生重复结论
         if (msg.get("text") or "").lstrip("*").strip().startswith("LocalAgent 分析结论"):
@@ -275,13 +277,17 @@ class Pipeline:
                   source=msg["group"], status="running", engine=None, engine_version=None,
                   started_at=now(), finished_at=None, report_path=None, error_msg=None,
                   source_text=text)
+        conv_id = next((g.get("id") for g in self.cfg.groups
+                        if g.get("name") == msg["group"]), "") or ""
         for it in items:
             m = it["msg"]
             db.insert("messages", ignore=True, msg_id=m["msg_id"], group_name=m["group"],
                       sender=m["sender"], received_at=it["arrived_at"],
                       msg_time=m.get("msg_time") or None,
                       matched_entry_id=it["entry"]["id"], matched_rule=it["rule_hit"],
-                      run_id=run_id, source_text=m["text"], parsed_json=it["audit_json"])
+                      run_id=run_id, source_text=m["text"], parsed_json=it["audit_json"],
+                      conversation_type="group", conversation_id=conv_id,
+                      reply_target=m["group"])
             db.audit("dingtalk", "msg_matched", m["group"], it["rule_hit"], run_id)
         if batched:
             db.audit("dingtalk", "alert_batch_analyzed", msg["group"],
@@ -357,7 +363,8 @@ class Pipeline:
             # 无问题结论同样先过 Reply Risk Gate：低风险场景（答疑/恢复）带 A 档证据时
             # 自动回复完整结论+依据；门禁未通过时回退到简短确认流程
             ctx_n = {"trigger": trigger, "at_me": trigger == "dingtalk_at_me",
-                     "audit_parsed": audit_parsed}
+                     "audit_parsed": audit_parsed,
+                     "reply_target": msg.get("reply_target") or msg["group"]}
             g = self._gate_evaluate(msg["group"], result, run_id, text, recv_n, ctx_n)
             sent = False
             if g and g["gate"]["reply_decision"] == "auto_reply":
@@ -371,7 +378,26 @@ class Pipeline:
                                   f"normal；{g['gate_brief']}", run_id)
                     sent = True
             if not sent:
-                self._reply_normal(msg["group"], result, run_id, text, received_at=recv_n)
+                if trigger == "dingtalk_private":
+                    # 私聊默认不自动回复：正常结论也生成草稿进待回复中心
+                    md_n = self._build_normal_markdown(result, text, recv_n)
+                    self.db.insert("auth_exec",
+                                   entry_id=(g["entry"]["id"] if g else "dingtalk-write-reply"),
+                                   run_id=run_id, action_type="message_write", matched=1,
+                                   reject_reason="私聊默认不自动回复，请人工确认",
+                                   exec_result="pending_reply", ts=now(),
+                                   payload=json.dumps(
+                                       {"group": msg["group"], "markdown": md_n,
+                                        "reply_channel": "private",
+                                        "reply_target": msg.get("reply_target") or "",
+                                        "run_id": run_id, "alert_type": "private_qa",
+                                        "summary": result.get("summary", ""), "anomalies": [],
+                                        "gate": (g or {}).get("gate_meta", {})},
+                                       ensure_ascii=False))
+                    self.db.audit("dingtalk", "reply_pending", msg["group"],
+                                  "private_normal", run_id)
+                else:
+                    self._reply_normal(msg["group"], result, run_id, text, received_at=recv_n)
         else:
             db.update("runs", "run_id", run_id, status="success", finished_at=now(),
                       engine=eng, engine_version=ver)
@@ -381,7 +407,8 @@ class Pipeline:
             self._reply_if_allowed(msg["group"], result, run_id, text, received_at=recv,
                                    ctx={"trigger": trigger,
                                         "at_me": trigger == "dingtalk_at_me",
-                                        "audit_parsed": audit_parsed})
+                                        "audit_parsed": audit_parsed,
+                                        "reply_target": msg.get("reply_target") or msg["group"]})
         out = {"handled": True, "run_id": run_id, "normal": result.get("normal")}
         if batched:
             out["batch_size"] = len(items)
@@ -644,6 +671,46 @@ class Pipeline:
         except Exception:
             pass
 
+    # 私聊工作咨询路由关键词：命中任一即进入分析，否则仅记录不分析
+    PRIVATE_WORK_KW = ("订单", "改签", "退票", "验价", "验座", "询价", "生单", "出票",
+                       "报警", "审计", "traceId", "eagleEye", "异常", "失败", "分析",
+                       "帮我", "查一下", "咨询", "工单", "排查", "资损", "金额", "退款")
+
+    async def _process_private(self, msg):
+        """私聊消息路由：工作咨询生成分析与回复草稿（默认不自动回复）；无关聊天仅记录。"""
+        db = self.db
+        text = msg.get("text") or ""
+        sender = msg.get("sender") or "私聊联系人"
+        conv_id = msg.get("conv_id") or ""
+        reply_target = msg.get("reply_target") or ""
+        if not any(k in text for k in self.PRIVATE_WORK_KW):
+            db.insert("messages", ignore=True, msg_id=msg["msg_id"], group_name=msg["group"],
+                      sender=sender, received_at=now(), msg_time=msg.get("msg_time") or None,
+                      matched_entry_id="private-direct", matched_rule="private_irrelevant",
+                      run_id=None, source_text=text,
+                      conversation_type="private", conversation_id=conv_id,
+                      reply_target=reply_target)
+            db.audit("dingtalk", "private_irrelevant", msg["group"], text[:80], None)
+            return {"handled": False, "reason": "private_irrelevant"}
+        run_id = new_id("run")
+        db.insert("runs", run_id=run_id, task_id="private-direct",
+                  trigger_type="dingtalk_private",
+                  source=msg["group"], status="running", engine=None, engine_version=None,
+                  started_at=now(), finished_at=None, report_path=None, error_msg=None,
+                  source_text=text)
+        db.insert("messages", ignore=True, msg_id=msg["msg_id"], group_name=msg["group"],
+                  sender=sender, received_at=now(), msg_time=msg.get("msg_time") or None,
+                  matched_entry_id="private-direct", matched_rule="private_direct",
+                  run_id=run_id, source_text=text,
+                  conversation_type="private", conversation_id=conv_id,
+                  reply_target=reply_target)
+        db.audit("dingtalk", "private_matched", msg["group"], text[:80], run_id)
+        item = {"msg": msg, "entry": {"id": "private-direct"}, "rule_hit": "private_direct",
+                "trigger": "dingtalk_private", "source": "private_qa", "parsed": None,
+                "audit_parsed": None, "audit_json": None, "codes": [], "matched_sols": [],
+                "arrived_at": now()}
+        return await self._analyze_items([item])
+
     def _gate_evaluate(self, group, result, run_id, source_text="", received_at="", ctx=None):
         """Reply Risk Gate 评估：校验写条目、计算外层放行、执行门禁决策并回写 result/报告。
         返回 {gate, entry, gate_meta, type_tag, gate_brief}；不可回复场景返回 None。"""
@@ -654,26 +721,31 @@ class Pipeline:
         if not self.cfg.dingtalk.get("reply_enabled", True):
             self.db.audit("dingtalk", "reply_skipped", group, "reply_enabled=false")
             return None
+        is_private = (ctx or {}).get("trigger") == "dingtalk_private"
         entry = authlist.find_entry(self.cfg.auth_entries, "dingtalk", "write", "回复分析结论到值班群")
-        if entry is None or group not in entry.get("constraints", {}).get("groups", []):
+        if entry is None or (not is_private
+                             and group not in entry.get("constraints", {}).get("groups", [])):
             self.db.insert("auth_exec", entry_id="dingtalk-write-reply", run_id=run_id,
                            action_type="message_write", matched=0,
                            reject_reason="no enabled entry or group not allowed",
                            exec_result="skipped", ts=now())
             return None
         policy = getattr(self.cfg, "reply_policy", None) or rp.default_policy()
-        group_auto = self._group_auto_reply(group, alert_type)
-        # 无家族关键词的低风险场景（监控恢复/答疑/历史重复）：群已配置自动回复白名单
-        # 即视为外层放行，仍须通过门禁全部硬规则（A 档证据/风险标记/场景白名单）
-        if not group_auto:
-            scenario_pre = rp.classify_scenario(result, source_text, ctx or {})
-            allowed_scn = (policy.get("auto_reply", {}) or {}).get(
-                "allowed_scenarios", [rp.SCN_LOW_RISK_QA, rp.SCN_MONITOR_RECOVERED,
-                                      rp.SCN_HISTORY_DUPLICATE])
-            if scenario_pre in allowed_scn and any(
-                    g.get("name") == group and (g.get("auto_reply_types") or [])
-                    for g in self.cfg.groups):
-                group_auto = True
+        if is_private:
+            group_auto = False  # 私聊默认永不自动回复，一律进待回复中心
+        else:
+            group_auto = self._group_auto_reply(group, alert_type)
+            # 无家族关键词的低风险场景（监控恢复/答疑/历史重复）：群已配置自动回复白名单
+            # 即视为外层放行，仍须通过门禁全部硬规则（A 档证据/风险标记/场景白名单）
+            if not group_auto:
+                scenario_pre = rp.classify_scenario(result, source_text, ctx or {})
+                allowed_scn = (policy.get("auto_reply", {}) or {}).get(
+                    "allowed_scenarios", [rp.SCN_LOW_RISK_QA, rp.SCN_MONITOR_RECOVERED,
+                                          rp.SCN_HISTORY_DUPLICATE])
+                if scenario_pre in allowed_scn and any(
+                        g.get("name") == group and (g.get("auto_reply_types") or [])
+                        for g in self.cfg.groups):
+                    group_auto = True
         gate = rp.decide(policy, result, source_text, ctx=ctx or {},
                          group_auto=group_auto, reply_enabled=True)
         # 决策回写 result 与报告 JSON，保证每次处理可回溯
@@ -686,12 +758,15 @@ class Pipeline:
                      "risk_markers": gate["risk_markers"],
                      "evidence_grade": gate["evidence_grade"],
                      "reply_decision": gate["reply_decision"],
-                     "reply_reason": gate["reply_reason"]}
+                     "reply_reason": gate["reply_reason"],
+                     "source_type": (ctx or {}).get("trigger") or ""}
         self._patch_report_meta(run_id, gate_meta)
         gate_brief = (f"gate={gate['reply_decision']}"
                       f"（{gate['reply_reason']}；markers={','.join(gate['risk_markers']) or '无'}）")
         return {"gate": gate, "entry": entry, "gate_meta": gate_meta,
-                "type_tag": alert_type or "unclassified", "gate_brief": gate_brief}
+                "type_tag": alert_type or "unclassified", "gate_brief": gate_brief,
+                "is_private": is_private,
+                "reply_target": (ctx or {}).get("reply_target") or group}
 
     def _reply_if_allowed(self, group, result, run_id, source_text="", received_at="", ctx=None):
         """结论回复统一经 Reply Risk Gate：群级 auto_reply 只是外层放行条件，不能绕过门禁。"""
@@ -700,6 +775,8 @@ class Pipeline:
             return
         gate, entry = g["gate"], g["entry"]
         type_tag, gate_brief, gate_meta = g["type_tag"], g["gate_brief"], g["gate_meta"]
+        reply_channel = "private" if g["is_private"] else "group"
+        reply_target = g["reply_target"]
 
         if gate["reply_decision"] == "no_reply":
             self.db.insert("auth_exec", entry_id=entry["id"], run_id=run_id,
@@ -731,6 +808,8 @@ class Pipeline:
                            reject_reason=f"自动回复被拦截：{reason}，请人工审核",
                            exec_result="pending_reply", ts=now(),
                            payload=json.dumps({"group": group,
+                                               "reply_channel": reply_channel,
+                                               "reply_target": reply_target,
                                                "markdown": self._build_reply_markdown(
                                                    result, source_text, received_at),
                                                "run_id": run_id, "alert_type": type_tag,
@@ -747,6 +826,8 @@ class Pipeline:
                                      f"{gate['reply_reason']}",
                        exec_result="pending_reply", ts=now(),
                        payload=json.dumps({"group": group, "markdown": md_rich,
+                                           "reply_channel": reply_channel,
+                                           "reply_target": reply_target,
                                            "run_id": run_id, "alert_type": type_tag,
                                            "summary": result.get("summary", ""),
                                            "anomalies": result.get("anomalies", []),
@@ -804,7 +885,10 @@ class Pipeline:
         payload = json.loads(row["payload"])
         group = payload["group"]
         md = payload["markdown"]
-        ok = bool(self.ding.reply(group, md))
+        if payload.get("reply_channel") == "private":
+            ok = bool(self.ding.reply_private(payload.get("reply_target") or "", md))
+        else:
+            ok = bool(self.ding.reply(group, md))
         if ok:
             self.db.update("auth_exec", "id", exec_id,
                            exec_result="replied", reject_reason="")
